@@ -80,61 +80,91 @@ fi
 META_CACHE_DIR="/tmp/prs_needing_attention_cache"
 mkdir -p "$META_CACHE_DIR"
 
-# Resolve GitHub username from gh auth, unless provided via -u/--user
-if [ "$USER_SET" = false ] && [ -z "${GH_USER}" ]; then
-  GH_USER_CACHE_FILE="$META_CACHE_DIR/gh_user_login.txt"
-  GH_USER_CACHE_TTL=86400  # 24 hours
-  USE_USER_CACHE=false
-  if [ -f "$GH_USER_CACHE_FILE" ]; then
-    if stat -f %m "$GH_USER_CACHE_FILE" >/dev/null 2>&1; then
-      CACHE_MTIME=$(stat -f %m "$GH_USER_CACHE_FILE")
+# Extracted helpers to reduce nested conditionals
+resolve_gh_user() {
+  # Early return if user explicitly provided or already resolved
+  if [ "$USER_SET" = true ] || [ -n "${GH_USER}" ]; then
+    return 0
+  fi
+
+  local cache_file="$META_CACHE_DIR/gh_user_login.txt"
+  local ttl=86400  # 24 hours
+  local use_cache=false
+
+  if [ -f "$cache_file" ]; then
+    local mtime
+    if stat -f %m "$cache_file" >/dev/null 2>&1; then
+      mtime=$(stat -f %m "$cache_file")
     else
-      CACHE_MTIME=$(stat -c %Y "$GH_USER_CACHE_FILE")
+      mtime=$(stat -c %Y "$cache_file")
     fi
-    CACHE_AGE=$(($(date +%s) - CACHE_MTIME))
-    if [ "$CACHE_AGE" -lt "$GH_USER_CACHE_TTL" ]; then
-      USE_USER_CACHE=true
+    local now
+    now=$(date +%s)
+    local age=$(( now - mtime ))
+    if [ "$age" -lt "$ttl" ]; then
+      use_cache=true
     fi
   fi
-  if [ "$USE_USER_CACHE" = true ]; then
-    GH_USER=$(cat "$GH_USER_CACHE_FILE" 2>/dev/null || true)
+
+  if [ "$use_cache" = true ]; then
+    GH_USER=$(cat "$cache_file" 2>/dev/null || true)
+    if [ -n "${GH_USER}" ]; then
+      return 0
+    fi
   fi
+
+  # Try gh api first
   if [ -z "${GH_USER}" ]; then
-    # Try gh api first
     GH_USER=$(gh api user -q .login 2>/dev/null || true)
   fi
+
+  # Fallback: parse from gh auth status
   if [ -z "${GH_USER}" ]; then
-    # Fallback: parse from gh auth status
     GH_USER=$(gh auth status 2>&1 | sed -n 's/.*Logged in to .* as \([^ ]*\).*/\1/p' | head -1 || true)
   fi
-  if [ -n "${GH_USER}" ]; then
-    echo "$GH_USER" > "$GH_USER_CACHE_FILE" || true
-  else
-    echo "Error: Could not determine GitHub username. Pass with -u USER or ensure gh auth is set up." >&2
-    exit 1
-  fi
-fi
 
-# Resolve repository (OWNER/REPO) from current directory when not provided
-if [ "$REPO_SET" = false ] && [ -z "${REPO}" ]; then
+  if [ -n "${GH_USER}" ]; then
+    echo "$GH_USER" > "$cache_file" || true
+    return 0
+  fi
+
+  echo "Error: Could not determine GitHub username. Pass with -u USER or ensure gh auth is set up." >&2
+  exit 1
+}
+
+resolve_repo() {
+  # Early return if repo explicitly provided or already resolved
+  if [ "$REPO_SET" = true ] || [ -n "${REPO}" ]; then
+    return 0
+  fi
+
   # Try gh repo view (works within a git repo with remote)
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-  if [ -z "${REPO}" ]; then
-    # Fallback to git remote parsing
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || true)
-      if [[ "$ORIGIN_URL" =~ ^git@github.com:([^/]+)/([^/.]+)(\.git)?$ ]]; then
-        REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-      elif [[ "$ORIGIN_URL" =~ ^https?://github.com/([^/]+)/([^/.]+)(\.git)?$ ]]; then
-        REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-      fi
+  if [ -n "${REPO}" ]; then
+    return 0
+  fi
+
+  # Fallback to git remote parsing
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || true)
+    if [[ "$ORIGIN_URL" =~ ^git@github.com:([^/]+)/([^/.]+)(\.git)?$ ]]; then
+      REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+      return 0
+    elif [[ "$ORIGIN_URL" =~ ^https?://github.com/([^/]+)/([^/.]+)(\.git)?$ ]]; then
+      REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+      return 0
     fi
   fi
-  if [ -z "${REPO}" ]; then
-    echo "Error: Could not determine repository. Run this script from within a GitHub repo or pass -r OWNER/REPO." >&2
-    exit 1
-  fi
-fi
+
+  echo "Error: Could not determine repository. Run this script from within a GitHub repo or pass -r OWNER/REPO." >&2
+  exit 1
+}
+
+# Resolve GitHub username from gh auth, unless provided via -u/--user
+resolve_gh_user
+
+# Resolve repository (OWNER/REPO) from current directory when not provided
+resolve_repo
 
 # If no label provided via env or flag, do not filter by label
 if [ -z "${LABEL}" ]; then

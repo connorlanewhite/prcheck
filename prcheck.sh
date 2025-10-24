@@ -1,34 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ------------------------------------------------------------
-# PRs Needing My Attention (GitHub GraphQL + jq + jtbl)
-# ------------------------------------------------------------
-# Logic:
-#  - Scope: open, non-draft, (optionally) labeled
-#  - Attention (ANY):
-#     A) I have not reviewed
-#     B) Commits landed after my last review
-#     C) Some files are not marked "Viewed" (UNVIEWED or DISMISSED)
-#
-# Output columns: Title (hyperlinked), Author, Type, Updated
-#                 OR Title, Author, Type, URL, Updated (when --no-title-as-hyperlink)
-#
-# Requirements:
-#  - gh (GitHub CLI) authenticated with repo scope
-#  - jq
-#  - jtbl
-#
-# Usage:
-#  ./prs_needing_attention.sh [options]
-#
-# Examples:
-#  ./prs_needing_attention.sh
-#  ./prs_needing_attention.sh -r myorg/myrepo -l "Platform" -u myuser -n 100 --include-review-requested
-#  ./prs_needing_attention.sh -L   # no label filter
-#  ./prs_needing_attention.sh --no-title-as-hyperlink   # show URL as separate column
-# ------------------------------------------------------------
-
 REPO=""                                # default: detect from current repo
 LABEL="${PRCHECK_DEFAULT_LABEL:-}"      # default label comes from env; no default when unset
 NO_LABEL=false       # use -L / --no-label to ignore label filtering
@@ -45,21 +17,23 @@ print_help() {
 Usage: $0 [options]
 
 Options:
-  -r, --repo OWNER/REPO        Repository (default: ${REPO})
-  -l, --label LABEL            PR label to filter (default: env PRCHECK_DEFAULT_LABEL; none if unset)
-  -L, --no-label               Ignore label filtering (search all open PRs)
-  -u, --user USERNAME          Your GitHub username (default: ${GH_USER})
-  -n, --limit N                Max PRs to fetch (default: ${LIMIT})
-      --include-review-requested
-                               Also include PRs explicitly review-requested to USER
-      --title-as-hyperlink     Embed URL as hyperlink in title (default: on)
-      --no-title-as-hyperlink  Show URL as separate column instead of hyperlink
-  -h, --help                   Show this help
+  -r, --repo OWNER/REPO           Repository (default: \\${REPO:-auto})
+  -l, --label LABEL               Filter by label (default: \$PRCHECK_DEFAULT_LABEL; none if unset)
+  -L, --no-label                  Do not filter by label
+  -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
+  -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
+      --include-review-requested  Include PRs where you are review-requested
+      --title-as-hyperlink        Title embeds URL (default)
+      --no-title-as-hyperlink     Show URL as separate column
+  -h, --help                      Show this help
 
-Notes:
-  * Requires: gh (authenticated), jq, and jtbl.
-  * Files pagination: we fetch first 100 changed files. If a PR has >100, we conservatively mark UnviewedFiles=true
-    when more pages exist, because we can't guarantee all are VIEWED without paging. This keeps attention signal safe.
+Examples:
+  $0
+  $0 -r myorg/myrepo -l "Platform" -u myuser -n 100 --include-review-requested
+  $0 -L
+  $0 --no-title-as-hyperlink
+
+Requires: gh (authenticated with repo scope), jq, jtbl.
 EOF
 }
 
@@ -220,15 +194,16 @@ else
   JQ_HYPERLINK_FLAG="false"
 fi
 
-# --- Cache logic (8 second TTL) ---
+# Cache (short TTL)
 CACHE_DIR="/tmp/prcheck_cache"
+CACHE_TTL="${PRCHECK_TTL:-8}"
 mkdir -p "$CACHE_DIR"
 
-# Create cache key from query parameters
+# Cache key from query parameters
 CACHE_KEY=$(echo "${SEARCH_Q}|${LIMIT}|${GRAPHQL_QUERY}" | shasum -a 256 | cut -d' ' -f1)
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
-# Check if cache exists and is fresh (< 8 seconds old)
+# Check if cache exists and is fresh (< $CACHE_TTL seconds old)
 USE_CACHE=false
 if [ -f "$CACHE_FILE" ]; then
   # Get file modification time (macOS uses -f %m, Linux uses -c %Y)
@@ -240,7 +215,7 @@ if [ -f "$CACHE_FILE" ]; then
     CACHE_MTIME=$(stat -c %Y "$CACHE_FILE")
   fi
   CACHE_AGE=$(($(date +%s) - CACHE_MTIME))
-  if [ "$CACHE_AGE" -lt 8 ]; then
+  if [ "$CACHE_AGE" -lt "$CACHE_TTL" ]; then
     USE_CACHE=true
   fi
 fi
@@ -258,12 +233,12 @@ fi
 
 # Process the response
 echo "$GRAPHQL_RESPONSE" \
-  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" '
-    (.data.search.nodes // [])                                       # safety: empty list if no matches
+  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" '
+    (.data.search.nodes // [])
     | map(
         . as $pr
         | ($pr.reviews.nodes
-            | map(select(.author.login == "'"$GH_USER"'"))
+            | map(select(.author.login == $ghUser))
             | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
           ) as $myLastReview
         | ($pr.commits.nodes[0].commit.committedDate // "1970-01-01T00:00:00Z") as $headCommittedAt
@@ -288,7 +263,7 @@ echo "$GRAPHQL_RESPONSE" \
           ) as $prType
         | ((.updatedAt | fromdate) - 21600 | strftime("%Y-%m-%d %I:%M %p CST")) as $updatedCST
         | (.author.login // "unknown") as $author
-        | select($author != "'"$GH_USER"'")
+        | select($author != $ghUser)
         | if $useHyperlinks == "true" then
             {
               Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),

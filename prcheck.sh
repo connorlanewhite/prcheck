@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ------------------------------------------------------------
+# PRs Needing My Attention (GitHub GraphQL + jq + jtbl)
+# ------------------------------------------------------------
+# Logic:
+#  - Scope: open, non-draft, (optionally) labeled
+#  - Attention (ANY):
+#     A) I have not reviewed
+#     B) Commits landed after my last review
+#     C) Some files are not marked "Viewed" (UNVIEWED or DISMISSED)
+#
+# Output columns: Title (hyperlinked), Author, Type, Updated
+#                 OR Title, Author, Type, URL, Updated (when --no-title-as-hyperlink)
+#
+# Requirements:
+#  - gh (GitHub CLI) authenticated with repo scope
+#  - jq
+#  - jtbl
+#
+# Usage:
+#  ./prs_needing_attention.sh [options]
+#
+# Examples:
+#  ./prs_needing_attention.sh
+#  ./prs_needing_attention.sh -r myorg/myrepo -l "Platform" -u myuser -n 100 --include-review-requested
+#  ./prs_needing_attention.sh -L   # no label filter
+#  ./prs_needing_attention.sh --no-title-as-hyperlink   # show URL as separate column
+# ------------------------------------------------------------
+
+REPO=""                                # default: detect from current repo
+LABEL="${PRCHECK_DEFAULT_LABEL:-}"      # default label comes from env; no default when unset
+NO_LABEL=false       # use -L / --no-label to ignore label filtering
+GH_USER=""                             # default: detect from gh auth (cached)
+LIMIT=50
+INCLUDE_REVIEW_REQUESTED=false
+TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
+# internal flags to know whether user explicitly set values via CLI
+USER_SET=false
+REPO_SET=false
+
+print_help() {
+  cat <<EOF
+Usage: $0 [options]
+
+Options:
+  -r, --repo OWNER/REPO        Repository (default: ${REPO})
+  -l, --label LABEL            PR label to filter (default: env PRCHECK_DEFAULT_LABEL; none if unset)
+  -L, --no-label               Ignore label filtering (search all open PRs)
+  -u, --user USERNAME          Your GitHub username (default: ${GH_USER})
+  -n, --limit N                Max PRs to fetch (default: ${LIMIT})
+      --include-review-requested
+                               Also include PRs explicitly review-requested to USER
+      --title-as-hyperlink     Embed URL as hyperlink in title (default: on)
+      --no-title-as-hyperlink  Show URL as separate column instead of hyperlink
+  -h, --help                   Show this help
+
+Notes:
+  * Requires: gh (authenticated), jq, and jtbl.
+  * Files pagination: we fetch first 100 changed files. If a PR has >100, we conservatively mark UnviewedFiles=true
+    when more pages exist, because we can't guarantee all are VIEWED without paging. This keeps attention signal safe.
+EOF
+}
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -r|--repo) REPO="$2"; REPO_SET=true; shift 2;;
+    -l|--label) LABEL="$2"; NO_LABEL=false; shift 2;;
+    -L|--no-label) NO_LABEL=true; shift;;
+    -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
+    -n|--limit) LIMIT="$2"; shift 2;;
+    --include-review-requested) INCLUDE_REVIEW_REQUESTED=true; shift;;
+    --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
+    --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
+    -h|--help) print_help; exit 0;;
+    *) echo "Unknown option: $1" >&2; print_help; exit 1;;
+  esac
+done
+
+# --- Checks ---
+command -v gh >/dev/null 2>&1 || { echo "Error: gh (GitHub CLI) is not installed. (brew install gh)" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq is not installed. (brew install jq)" >&2; exit 1; }
+command -v jtbl >/dev/null 2>&1 || { echo "Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
+
+if ! gh auth status >/dev/null 2>&1; then
+  echo "Error: gh is not authenticated. Run: gh auth login" >&2
+  exit 1
+fi
+
+# Check that gh has the required 'repo' scope
+GH_SCOPES=$(gh auth status 2>&1 | grep -i "Token scopes:" | head -1 | sed "s/.*Token scopes: //; s/'//g")
+if [[ ! "$GH_SCOPES" =~ repo ]]; then
+  echo "Error: gh token is missing the required 'repo' scope." >&2
+  echo "       Current scopes: $GH_SCOPES" >&2
+  echo "       This script requires the 'repo' scope to access:" >&2
+  echo "         - PR information and reviews" >&2
+  echo "         - File viewer state (which files you've viewed)" >&2
+  echo "       To refresh with correct scopes, run: gh auth refresh -s repo" >&2
+  exit 1
+fi
+
+# --- Resolve defaults (user, repo, label from env already handled) ---
+# Create a small cache for metadata like GH user (separate from API response cache)
+META_CACHE_DIR="/tmp/prs_needing_attention_cache"
+mkdir -p "$META_CACHE_DIR"
+
+# Resolve GitHub username from gh auth, unless provided via -u/--user
+if [ "$USER_SET" = false ] && [ -z "${GH_USER}" ]; then
+  GH_USER_CACHE_FILE="$META_CACHE_DIR/gh_user_login.txt"
+  GH_USER_CACHE_TTL=86400  # 24 hours
+  USE_USER_CACHE=false
+  if [ -f "$GH_USER_CACHE_FILE" ]; then
+    if stat -f %m "$GH_USER_CACHE_FILE" >/dev/null 2>&1; then
+      CACHE_MTIME=$(stat -f %m "$GH_USER_CACHE_FILE")
+    else
+      CACHE_MTIME=$(stat -c %Y "$GH_USER_CACHE_FILE")
+    fi
+    CACHE_AGE=$(($(date +%s) - CACHE_MTIME))
+    if [ "$CACHE_AGE" -lt "$GH_USER_CACHE_TTL" ]; then
+      USE_USER_CACHE=true
+    fi
+  fi
+  if [ "$USE_USER_CACHE" = true ]; then
+    GH_USER=$(cat "$GH_USER_CACHE_FILE" 2>/dev/null || true)
+  fi
+  if [ -z "${GH_USER}" ]; then
+    # Try gh api first
+    GH_USER=$(gh api user -q .login 2>/dev/null || true)
+  fi
+  if [ -z "${GH_USER}" ]; then
+    # Fallback: parse from gh auth status
+    GH_USER=$(gh auth status 2>&1 | sed -n 's/.*Logged in to .* as \([^ ]*\).*/\1/p' | head -1 || true)
+  fi
+  if [ -n "${GH_USER}" ]; then
+    echo "$GH_USER" > "$GH_USER_CACHE_FILE" || true
+  else
+    echo "Error: Could not determine GitHub username. Pass with -u USER or ensure gh auth is set up." >&2
+    exit 1
+  fi
+fi
+
+# Resolve repository (OWNER/REPO) from current directory when not provided
+if [ "$REPO_SET" = false ] && [ -z "${REPO}" ]; then
+  # Try gh repo view (works within a git repo with remote)
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+  if [ -z "${REPO}" ]; then
+    # Fallback to git remote parsing
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || true)
+      if [[ "$ORIGIN_URL" =~ ^git@github.com:([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+      elif [[ "$ORIGIN_URL" =~ ^https?://github.com/([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+      fi
+    fi
+  fi
+  if [ -z "${REPO}" ]; then
+    echo "Error: Could not determine repository. Run this script from within a GitHub repo or pass -r OWNER/REPO." >&2
+    exit 1
+  fi
+fi
+
+# If no label provided via env or flag, do not filter by label
+if [ -z "${LABEL}" ]; then
+  NO_LABEL=true
+fi
+
+# --- Build search query string ---
+SEARCH_Q="repo:${REPO} is:pr is:open -is:draft"
+if [ "$NO_LABEL" = false ]; then
+  SEARCH_Q="${SEARCH_Q} label:\"${LABEL}\""
+fi
+if $INCLUDE_REVIEW_REQUESTED; then
+  SEARCH_Q="${SEARCH_Q} review-requested:${GH_USER}"
+fi
+SEARCH_Q="${SEARCH_Q} sort:updated-desc"
+
+# --- GraphQL query (single call) ---
+GRAPHQL_QUERY=$(cat <<'GRAPHQL'
+query($q: String!, $limit: Int!) {
+  search(query: $q, type: ISSUE, first: $limit) {
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        url
+        updatedAt
+        isDraft
+        author { login }
+        commits(last: 1) {
+          nodes { commit { committedDate oid } }
+        }
+        reviews(first: 50) {
+          nodes {
+            author { login }
+            state
+            submittedAt
+          }
+        }
+        files(first: 100) {
+          nodes { path viewerViewedState }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+
+# --- Run and pretty-print ---
+# Columns: Title | Author | Type | URL | Updated (or Title | Author | Type | Updated when hyperlinks enabled)
+
+# Convert bash boolean to jq boolean
+if [ "$TITLE_AS_HYPERLINK" = true ]; then
+  JQ_HYPERLINK_FLAG="true"
+else
+  JQ_HYPERLINK_FLAG="false"
+fi
+
+# --- Cache logic (8 second TTL) ---
+CACHE_DIR="/tmp/prcheck_cache"
+mkdir -p "$CACHE_DIR"
+
+# Create cache key from query parameters
+CACHE_KEY=$(echo "${SEARCH_Q}|${LIMIT}|${GRAPHQL_QUERY}" | shasum -a 256 | cut -d' ' -f1)
+CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
+
+# Check if cache exists and is fresh (< 8 seconds old)
+USE_CACHE=false
+if [ -f "$CACHE_FILE" ]; then
+  # Get file modification time (macOS uses -f %m, Linux uses -c %Y)
+  if stat -f %m "$CACHE_FILE" >/dev/null 2>&1; then
+    # macOS
+    CACHE_MTIME=$(stat -f %m "$CACHE_FILE")
+  else
+    # Linux
+    CACHE_MTIME=$(stat -c %Y "$CACHE_FILE")
+  fi
+  CACHE_AGE=$(($(date +%s) - CACHE_MTIME))
+  if [ "$CACHE_AGE" -lt 8 ]; then
+    USE_CACHE=true
+  fi
+fi
+
+# Fetch data (from cache or API)
+if [ "$USE_CACHE" = true ]; then
+  GRAPHQL_RESPONSE=$(cat "$CACHE_FILE")
+else
+  GRAPHQL_RESPONSE=$(gh api graphql \
+    -F q="$SEARCH_Q" \
+    -F limit="$LIMIT" \
+    -f query="$GRAPHQL_QUERY")
+  echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
+fi
+
+# Process the response
+echo "$GRAPHQL_RESPONSE" \
+  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" '
+    (.data.search.nodes // [])                                       # safety: empty list if no matches
+    | map(
+        . as $pr
+        | ($pr.reviews.nodes
+            | map(select(.author.login == "'"$GH_USER"'"))
+            | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
+          ) as $myLastReview
+        | ($pr.commits.nodes[0].commit.committedDate // "1970-01-01T00:00:00Z") as $headCommittedAt
+        | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
+        | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewedFiles
+        | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
+        | ($myLastReview == null) as $neverReviewed
+        | (if $neverReviewed then false else ($headCommittedAt > ($myLastReview.submittedAt // "")) end) as $newSinceReview
+        | ($hasUnviewedInFirst100 or $filesHasMore) as $unviewedFlag
+        | (
+            $neverReviewed
+            or $newSinceReview
+            or $unviewedFlag
+          ) as $needsAttention
+        | select($needsAttention)
+        | (
+            if $newSinceReview then "New Commits"
+            elif $hasAnyViewedFiles then "Unviewed Files"
+            elif $neverReviewed then "Never Reviewed"
+            else "Unknown"
+            end
+          ) as $prType
+        | ((.updatedAt | fromdate) - 21600 | strftime("%Y-%m-%d %I:%M %p CST")) as $updatedCST
+        | (.author.login // "unknown") as $author
+        | select($author != "'"$GH_USER"'")
+        | if $useHyperlinks == "true" then
+            {
+              Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),
+              " Author": $author,
+              "  Type": $prType,
+              "   Updated": $updatedCST
+            }
+          else
+            {
+              Title: (.title[0:50]),
+              Author: $author,
+              Type: $prType,
+              URL: .url,
+              Updated: $updatedCST
+            }
+          end
+      )
+' | jtbl --fancy

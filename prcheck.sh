@@ -286,7 +286,7 @@ echo "$GRAPHQL_RESPONSE" \
         | select($needsAttention)
         | (
             if $newSinceReview then "New Commits"
-            elif $hasAnyViewedFiles then "Unviewed Files"
+            elif $unviewedFlag then "Unviewed Files"
             elif $neverReviewed then "Never Reviewed"
             else "Unknown"
             end

@@ -303,7 +303,7 @@ echo "$GRAPHQL_RESPONSE" \
             }
           else
             {
-              Title: (.title[0:50]),
+              Title: (if (.title | length) > 50 then (.title[0:50] + "...") else .title end),
               Author: $author,
               Type: $prType,
               URL: .url,

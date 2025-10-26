@@ -8,6 +8,7 @@ GH_USER=""                             # default: detect from gh auth (cached)
 LIMIT=50
 INCLUDE_REVIEW_REQUESTED=false
 TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
+JSON_OUTPUT=false  # use --json to output JSON instead of table
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -25,6 +26,7 @@ Options:
       --include-review-requested  Include PRs where you are review-requested
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
+  -j, --json                      Output JSON instead of table
   -h, --help                      Show this help
 
 Examples:
@@ -48,15 +50,18 @@ while [[ $# -gt 0 ]]; do
     --include-review-requested) INCLUDE_REVIEW_REQUESTED=true; shift;;
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
+    -j|--json) JSON_OUTPUT=true; shift;;
     -h|--help) print_help; exit 0;;
-    *) echo "[prcheck] Error: Unknown option – $1" >&2; print_help; exit 1;;
+    *) echo "[prcheck] Error: Unknown option: $1" >&2; print_help; exit 1;;
   esac
 done
 
 # --- Checks ---
 command -v gh >/dev/null 2>&1 || { echo "[prcheck] Error: gh (GitHub CLI) is not installed. (brew install gh)" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "[prcheck] Error: jq is not installed. (brew install jq)" >&2; exit 1; }
-command -v jtbl >/dev/null 2>&1 || { echo "[prcheck] Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
+if [ "$JSON_OUTPUT" = false ]; then
+  command -v jtbl >/dev/null 2>&1 || { echo "[prcheck] Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
+fi
 
 if ! gh auth status >/dev/null 2>&1; then
   echo "[prcheck] Error: gh is not authenticated. Run: gh auth login" >&2
@@ -218,7 +223,10 @@ GRAPHQL
 # Columns: Title | Author | Type | URL | Updated (or Title | Author | Type | Updated when hyperlinks enabled)
 
 # Convert bash boolean to jq boolean
-if [ "$TITLE_AS_HYPERLINK" = true ]; then
+# When JSON output is enabled, disable hyperlinks (escape codes don't make sense in JSON)
+if [ "$JSON_OUTPUT" = true ]; then
+  JQ_HYPERLINK_FLAG="false"
+elif [ "$TITLE_AS_HYPERLINK" = true ]; then
   JQ_HYPERLINK_FLAG="true"
 else
   JQ_HYPERLINK_FLAG="false"
@@ -311,4 +319,4 @@ echo "$GRAPHQL_RESPONSE" \
             }
           end
       )
-' | jtbl --fancy
+' | if [ "$JSON_OUTPUT" = true ]; then cat; else jtbl --fancy; fi

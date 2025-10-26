@@ -58,5 +58,6 @@ Common flags:
 - `-n NUMBER` — max PRs to fetch (default: 50)
 - `--include-review-requested` — also show PRs where you're tagged as a reviewer
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
+- `--json` - output JSON instead of a table (also enables `--no-title-as-hyperlink`)
 
 Run `./prcheck.sh --help` for the full list of options.

@@ -1,1 +1,26 @@
+# JetBrains IDEs
 .idea/*
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Vim
+*.swp
+*.swo
+*.swn
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Future local config
+.prcheck_config
+
+# Other common files
+*.log
+.env
+.env.local

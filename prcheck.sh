@@ -49,29 +49,29 @@ while [[ $# -gt 0 ]]; do
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     -h|--help) print_help; exit 0;;
-    *) echo "Unknown option: $1" >&2; print_help; exit 1;;
+    *) echo "[prcheck] Error: Unknown option – $1" >&2; print_help; exit 1;;
   esac
 done
 
 # --- Checks ---
-command -v gh >/dev/null 2>&1 || { echo "Error: gh (GitHub CLI) is not installed. (brew install gh)" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "Error: jq is not installed. (brew install jq)" >&2; exit 1; }
-command -v jtbl >/dev/null 2>&1 || { echo "Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
+command -v gh >/dev/null 2>&1 || { echo "[prcheck] Error: gh (GitHub CLI) is not installed. (brew install gh)" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "[prcheck] Error: jq is not installed. (brew install jq)" >&2; exit 1; }
+command -v jtbl >/dev/null 2>&1 || { echo "[prcheck] Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
 
 if ! gh auth status >/dev/null 2>&1; then
-  echo "Error: gh is not authenticated. Run: gh auth login" >&2
+  echo "[prcheck] Error: gh is not authenticated. Run: gh auth login" >&2
   exit 1
 fi
 
 # Check that gh has the required 'repo' scope
 GH_SCOPES=$(gh auth status 2>&1 | grep -i "Token scopes:" | head -1 | sed "s/.*Token scopes: //; s/'//g")
 if [[ ! "$GH_SCOPES" =~ repo ]]; then
-  echo "Error: gh token is missing the required 'repo' scope." >&2
-  echo "       Current scopes: $GH_SCOPES" >&2
-  echo "       This script requires the 'repo' scope to access:" >&2
-  echo "         - PR information and reviews" >&2
-  echo "         - File viewer state (which files you've viewed)" >&2
-  echo "       To refresh with correct scopes, run: gh auth refresh -s repo" >&2
+  echo "[prcheck] Error: gh token is missing the required 'repo' scope." >&2
+  echo "[prcheck]        Current scopes: $GH_SCOPES" >&2
+  echo "[prcheck]        This script requires the 'repo' scope to access:" >&2
+  echo "[prcheck]          - PR information and reviews" >&2
+  echo "[prcheck]          - File viewer state (which files you've viewed)" >&2
+  echo "[prcheck]        To refresh with correct scopes, run: gh auth refresh -s repo" >&2
   exit 1
 fi
 
@@ -128,7 +128,7 @@ resolve_gh_user() {
     return 0
   fi
 
-  echo "Error: Could not determine GitHub username. Pass with -u USER or ensure gh auth is set up." >&2
+  echo "[prcheck] Error: Could not determine GitHub username. Pass with -u USER or ensure gh auth is set up." >&2
   exit 1
 }
 
@@ -156,7 +156,7 @@ resolve_repo() {
     fi
   fi
 
-  echo "Error: Could not determine repository. Run this script from within a GitHub repo or pass -r OWNER/REPO." >&2
+  echo "[prcheck] Error: Could not determine repository. Run this script from within a GitHub repo or pass -r OWNER/REPO." >&2
   exit 1
 }
 

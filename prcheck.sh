@@ -193,7 +193,7 @@ query($q: String!, $limit: Int!) {
         updatedAt
         isDraft
         author { login }
-        commits(last: 1) {
+        commits(last: 10) {
           nodes { commit { committedDate oid } }
         }
         reviews(first: 50) {
@@ -271,12 +271,12 @@ echo "$GRAPHQL_RESPONSE" \
             | map(select(.author.login == $ghUser))
             | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
           ) as $myLastReview
-        | ($pr.commits.nodes[0].commit.committedDate // "1970-01-01T00:00:00Z") as $headCommittedAt
+        | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
         | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
         | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewedFiles
         | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
         | ($myLastReview == null) as $neverReviewed
-        | (if $neverReviewed then false else ($headCommittedAt > ($myLastReview.submittedAt // "")) end) as $newSinceReview
+        | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
         | ($hasUnviewedInFirst100 or $filesHasMore) as $unviewedFlag
         | (
             $neverReviewed

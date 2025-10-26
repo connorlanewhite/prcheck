@@ -37,6 +37,30 @@ With that said, you do need:
 
 (All of which are available via Homebrew)
 
+## Install
+
+Install prcheck with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/connorlanewhite/prcheck/main/install.sh | bash
+```
+
+This will download and install prcheck to `~/.local/bin`. Make sure `~/.local/bin` is in your PATH.
+
+Alternatively, you can manually download the script:
+
+```bash
+curl -o prcheck https://raw.githubusercontent.com/connorlanewhite/prcheck/main/bin/prcheck
+chmod +x prcheck
+mv prcheck ~/.local/bin/
+```
+
+Then install the dependencies:
+
+```bash
+brew install gh jq jtbl
+```
+
 ## Usage
 
 Basic usage (auto-detects everything):
@@ -49,8 +73,6 @@ Set a default label filter via environment variable:
 export PRCHECK_DEFAULT_LABEL="needs-review"
 ./bin/prcheck
 ```
-
-However, I like to put the script somewhere, `chmod` and alias it to run from any repo I like.
 
 Common flags:
 - `-r OWNER/REPO` — specify a different repo

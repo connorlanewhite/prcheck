@@ -1,5 +1,7 @@
 # prcheck
 
+<img width="700" alt="prcheck" src="https://github.com/user-attachments/assets/884dbfda-fa87-4882-8396-0a0f6d440e7d" />
+
 ## Why this exists
 
 If you look at the list of open PRs on GitHub, you can filter by a lot of things, but it's still quite challenging to find PRs that need your attention.

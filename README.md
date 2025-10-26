@@ -15,6 +15,15 @@ Queries GitHub's API to find open PRs and intelligently filters them based on yo
 
 Run it from any GitHub repo; it'll auto-detect the repo and your username. Or point it at any repo you want with flags.
 
+## Limitations
+
+Due to GitHub API pagination constraints, this tool has the following limitations:
+
+- **File checking**: Only the first 100 files per PR are fetched. If a PR has more than 100 files, the "Unviewed Files" indicator may not be accurate.
+- **Review history**: Only the first 50 most recent reviews per PR are checked. If a PR has more than 50 reviews and your review was earlier, it may be incorrectly flagged as "Never Reviewed".
+
+For most PRs, these limits are sufficient. However, be aware of potential false positives on exceptionally large or heavily-reviewed PRs.
+
 ## Why a shell script
 
 Because installing Node, Python, or Ruby just to check your PRs is silly. 

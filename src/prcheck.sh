@@ -196,7 +196,7 @@ query($q: String!, $limit: Int!) {
         commits(last: 10) {
           nodes { commit { committedDate oid } }
         }
-        reviews(first: 50) {
+        reviews(last: 50) {
           nodes {
             author { login }
             state

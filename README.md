@@ -30,13 +30,13 @@ With that said, you do need:
 
 Basic usage (auto-detects everything):
 ```bash
-./prcheck.sh
+./src/prcheck.sh
 ```
 
 Set a default label filter via environment variable:
 ```bash
 export PRCHECK_DEFAULT_LABEL="needs-review"
-./prcheck.sh
+./src/prcheck.sh
 ```
 
 However, I like to put the script somewhere, `chmod` and alias it to run from any repo I like.

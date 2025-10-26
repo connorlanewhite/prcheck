@@ -197,7 +197,7 @@ query($q: String!, $limit: Int!) {
         url
         updatedAt
         isDraft
-        author { login }
+        author { login ... on User { name } }
         commits(last: 10) {
           nodes { commit { committedDate oid } }
         }
@@ -300,8 +300,8 @@ echo "$GRAPHQL_RESPONSE" \
             end
           ) as $prType
         | ((.updatedAt | fromdate) | strflocaltime("%Y-%m-%d %I:%M %p %Z")) as $updatedLocal
-        | (.author.login // "unknown") as $author
-        | select($author != $ghUser)
+        | (if (.author.name // "" | length) > 0 then .author.name else (.author.login // "unknown") end) as $author
+        | select((.author.login // "unknown") != $ghUser)
         | if $useHyperlinks == "true" then
             {
               Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),

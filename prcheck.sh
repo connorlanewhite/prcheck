@@ -291,7 +291,7 @@ echo "$GRAPHQL_RESPONSE" \
             else "Unknown"
             end
           ) as $prType
-        | ((.updatedAt | fromdate) - 21600 | strftime("%Y-%m-%d %I:%M %p CST")) as $updatedCST
+        | ((.updatedAt | fromdate) | strflocaltime("%Y-%m-%d %I:%M %p %Z")) as $updatedLocal
         | (.author.login // "unknown") as $author
         | select($author != $ghUser)
         | if $useHyperlinks == "true" then
@@ -299,7 +299,7 @@ echo "$GRAPHQL_RESPONSE" \
               Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),
               " Author": $author,
               "  Type": $prType,
-              "   Updated": $updatedCST
+              "   Updated": $updatedLocal
             }
           else
             {
@@ -307,7 +307,7 @@ echo "$GRAPHQL_RESPONSE" \
               Author: $author,
               Type: $prType,
               URL: .url,
-              Updated: $updatedCST
+              Updated: $updatedLocal
             }
           end
       )

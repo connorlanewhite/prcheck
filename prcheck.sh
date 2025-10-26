@@ -77,7 +77,7 @@ fi
 
 # --- Resolve defaults (user, repo, label from env already handled) ---
 # Create a small cache for metadata like GH user (separate from API response cache)
-META_CACHE_DIR="/tmp/prs_needing_attention_cache"
+META_CACHE_DIR="/tmp/prcheck_cache"
 mkdir -p "$META_CACHE_DIR"
 
 # Extracted helpers to reduce nested conditionals

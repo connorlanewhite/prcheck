@@ -1,6 +1,7 @@
 # prcheck
 
-<img width="700" alt="prcheck" src="https://github.com/user-attachments/assets/884dbfda-fa87-4882-8396-0a0f6d440e7d" />
+<img width="700" alt="prcheck" src="https://github.com/user-attachments/assets/fd12e620-a5bf-4a44-86ca-601b5ff3c3c1" />
+
 
 ## Why this exists
 

@@ -45,7 +45,7 @@ Install prcheck with a single command:
 curl -fsSL https://raw.githubusercontent.com/connorlanewhite/prcheck/main/install.sh | bash
 ```
 
-This will download and install prcheck to `~/.local/bin`. Make sure `~/.local/bin` is in your PATH.
+This will download and install prcheck to `~/.local/bin`. If prcheck is already installed, it will update to the latest version. Make sure `~/.local/bin` is in your PATH.
 
 Alternatively, you can manually download the script:
 

@@ -5,9 +5,15 @@ set -euo pipefail
 # Downloads and installs prcheck to ~/.local/bin
 
 INSTALL_DIR="${HOME}/.local/bin"
-BINARY_NAME="prcheck"
 
-echo "Installing prcheck..."
+# Check if prcheck is already installed
+if [ -f "${INSTALL_DIR}/prcheck" ]; then
+  echo "Updating prcheck to latest version..."
+  ACTION="updated"
+else
+  echo "Installing prcheck..."
+  ACTION="installed"
+fi
 
 # Create install directory if it doesn't exist
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -25,7 +31,7 @@ fi
 # Make it executable
 chmod +x "${INSTALL_DIR}/prcheck"
 
-echo "✓ prcheck installed to ${INSTALL_DIR}/prcheck"
+echo "✓ prcheck ${ACTION} to ${INSTALL_DIR}/prcheck"
 
 # Check if install directory is in PATH
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then

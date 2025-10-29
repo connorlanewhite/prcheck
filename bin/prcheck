@@ -9,6 +9,8 @@ LIMIT=50
 INCLUDE_REVIEW_REQUESTED=false
 TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
 JSON_OUTPUT=false  # use --json to output JSON instead of table
+# Comma-separated GitHub logins to include (empty means no author filtering)
+AUTHORS="${PRCHECK_AUTHORS:-}"
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -21,6 +23,7 @@ Options:
   -r, --repo OWNER/REPO           Repository (default: \\${REPO:-auto})
   -l, --label LABEL               Filter by label (default: \$PRCHECK_DEFAULT_LABEL; none if unset)
   -L, --no-label                  Do not filter by label
+  -a, --authors USER1,USER2       Comma-separated authors (GitHub logins) to include
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
       --include-review-requested  Include PRs where you are review-requested
@@ -34,6 +37,7 @@ Examples:
   $0 -r myorg/myrepo -l "Platform" -u myuser -n 100 --include-review-requested
   $0 -L
   $0 --no-title-as-hyperlink
+  $0 -a user1,user2
 
 Requires: gh (authenticated with repo scope), jq, jtbl.
 EOF
@@ -45,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     -r|--repo) REPO="$2"; REPO_SET=true; shift 2;;
     -l|--label) LABEL="$2"; NO_LABEL=false; shift 2;;
     -L|--no-label) NO_LABEL=true; shift;;
+    -a|--authors) AUTHORS="$2"; shift 2;;
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
     --include-review-requested) INCLUDE_REVIEW_REQUESTED=true; shift;;
@@ -271,8 +276,9 @@ fi
 
 # Process the response
 echo "$GRAPHQL_RESPONSE" \
-  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" '
+  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" --arg authorsCsv "$AUTHORS" '
     (.data.search.nodes // [])
+    | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
     | map(
         . as $pr
         | ($pr.reviews.nodes
@@ -300,8 +306,9 @@ echo "$GRAPHQL_RESPONSE" \
             end
           ) as $prType
         | ((.updatedAt | fromdate) | strflocaltime("%Y-%m-%d %I:%M %p %Z")) as $updatedLocal
-        | (if (.author.name // "" | length) > 0 then .author.name else (.author.login // "unknown") end) as $author
-        | select((.author.login // "unknown") != $ghUser)
+        | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
+        | select((($pr.author.login // "unknown") != $ghUser))
+        | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
         | if $useHyperlinks == "true" then
             {
               Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),

@@ -16,6 +16,8 @@ This script fixes that by showing only the PRs that genuinely need your review:
 
 Queries GitHub's API to find open PRs and intelligently filters them based on your interaction history. For each PR, it checks whether you've reviewed it, whether new commits have landed since your last review, and whether you've viewed all the files. Only PRs that need your attention make it to the output table.
 
+By default, only PRs targeting the repository's default branch (e.g., `main` or `master`) are shown. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
+
 Run it from any GitHub repo; it'll auto-detect the repo and your username. Or point it at any repo you want with flags.
 
 ## Limitations
@@ -82,6 +84,7 @@ Common flags:
 - `-u USERNAME` — set your GitHub username explicitly
 - `-n NUMBER` — max PRs to fetch (default: 50)
 - `--include-review-requested` — also show PRs where you're tagged as a reviewer
+- `--include-all-base-branches` — include PRs targeting any base branch (default: only default branch)
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
 - `--json` - output JSON instead of a table (also enables `--no-title-as-hyperlink`)
 

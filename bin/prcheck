@@ -11,6 +11,8 @@ TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
 JSON_OUTPUT=false  # use --json to output JSON instead of table
 # Comma-separated GitHub logins to include (empty means no author filtering)
 AUTHORS="${PRCHECK_AUTHORS:-}"
+# Default: exclude PRs where base branch is not the repo's default branch
+EXCLUDE_NON_DEFAULT_BASE=true
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -27,6 +29,7 @@ Options:
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
       --include-review-requested  Include PRs where you are review-requested
+      --include-all-base-branches Include PRs targeting any base branch (default: only default branch)
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
   -j, --json                      Output JSON instead of table
@@ -38,6 +41,7 @@ Examples:
   $0 -L
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
+  $0 --include-all-base-branches
 
 Requires: gh (authenticated with repo scope), jq, jtbl.
 EOF
@@ -53,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
     --include-review-requested) INCLUDE_REVIEW_REQUESTED=true; shift;;
+    --include-all-base-branches) EXCLUDE_NON_DEFAULT_BASE=false; shift;;
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
@@ -202,6 +207,10 @@ query($q: String!, $limit: Int!) {
         url
         updatedAt
         isDraft
+        baseRefName
+        repository {
+          defaultBranchRef { name }
+        }
         author { login ... on User { name } }
         commits(last: 10) {
           nodes { commit { committedDate oid } }
@@ -235,6 +244,13 @@ elif [ "$TITLE_AS_HYPERLINK" = true ]; then
   JQ_HYPERLINK_FLAG="true"
 else
   JQ_HYPERLINK_FLAG="false"
+fi
+
+# Convert EXCLUDE_NON_DEFAULT_BASE to jq boolean
+if [ "$EXCLUDE_NON_DEFAULT_BASE" = true ]; then
+  JQ_EXCLUDE_NON_DEFAULT_BASE="true"
+else
+  JQ_EXCLUDE_NON_DEFAULT_BASE="false"
 fi
 
 # Cache (short TTL)
@@ -276,7 +292,7 @@ fi
 
 # Process the response
 echo "$GRAPHQL_RESPONSE" \
-  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" --arg authorsCsv "$AUTHORS" '
+  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" --arg authorsCsv "$AUTHORS" --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" '
     (.data.search.nodes // [])
     | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
     | map(
@@ -309,6 +325,7 @@ echo "$GRAPHQL_RESPONSE" \
         | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
         | select((($pr.author.login // "unknown") != $ghUser))
         | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
+        | select( ($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name) )
         | if $useHyperlinks == "true" then
             {
               Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),

@@ -36,7 +36,7 @@ Because installing Node, Python, or Ruby just to check your PRs is silly.
 With that said, you do need:
 - GitHub CLI (gh)
 - jq
-- jtbl
+- jtab
 
 (All of which are available via Homebrew)
 
@@ -61,7 +61,9 @@ mv prcheck ~/.local/bin/
 Then install the dependencies:
 
 ```bash
-brew install gh jq jtbl
+brew install gh jq
+brew tap wlezzar/jtab https://github.com/wlezzar/jtab
+brew install wlezzar/jtab/jtab
 ```
 
 ## Usage

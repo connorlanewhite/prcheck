@@ -43,7 +43,7 @@ Examples:
   $0 -a user1,user2
   $0 --include-all-base-branches
 
-Requires: gh (authenticated with repo scope), jq, jtbl.
+Requires: gh (authenticated with repo scope), jq.
 EOF
 }
 
@@ -69,17 +69,44 @@ done
 # --- Checks ---
 command -v gh >/dev/null 2>&1 || { echo "[prcheck] Error: gh (GitHub CLI) is not installed. (brew install gh)" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "[prcheck] Error: jq is not installed. (brew install jq)" >&2; exit 1; }
-if [ "$JSON_OUTPUT" = false ]; then
-  command -v jtbl >/dev/null 2>&1 || { echo "[prcheck] Error: jtbl is not installed. (brew install jtbl)" >&2; exit 1; }
+# jtab is no longer required: table output is rendered in-script so that
+# ANSI hyperlink escape codes don't confuse column-width math.
+
+# --- Resolve defaults (user, repo, label from env already handled) ---
+# Create a small cache for metadata (gh auth status, gh user).
+META_CACHE_DIR="/tmp/prcheck_cache"
+mkdir -p "$META_CACHE_DIR"
+
+# Cache `gh auth status` output to skip the ~600ms subprocess on warm runs.
+# Only cache on success with a valid 'repo' scope so broken auth states cause
+# a real retry on the next invocation.
+GH_AUTH_CACHE_FILE="$META_CACHE_DIR/gh_auth_status.txt"
+GH_AUTH_TTL="${PRCHECK_AUTH_TTL:-21600}"  # 6 hours
+GH_AUTH_OUTPUT=""
+GH_AUTH_FROM_CACHE=false
+
+if [ -f "$GH_AUTH_CACHE_FILE" ]; then
+  if stat -f %m "$GH_AUTH_CACHE_FILE" >/dev/null 2>&1; then
+    GH_AUTH_MTIME=$(stat -f %m "$GH_AUTH_CACHE_FILE")
+  else
+    GH_AUTH_MTIME=$(stat -c %Y "$GH_AUTH_CACHE_FILE")
+  fi
+  GH_AUTH_AGE=$(( $(date +%s) - GH_AUTH_MTIME ))
+  if [ "$GH_AUTH_AGE" -lt "$GH_AUTH_TTL" ]; then
+    GH_AUTH_OUTPUT=$(cat "$GH_AUTH_CACHE_FILE" 2>/dev/null || true)
+    [ -n "$GH_AUTH_OUTPUT" ] && GH_AUTH_FROM_CACHE=true
+  fi
 fi
 
-if ! gh auth status >/dev/null 2>&1; then
-  echo "[prcheck] Error: gh is not authenticated. Run: gh auth login" >&2
-  exit 1
+if [ "$GH_AUTH_FROM_CACHE" = false ]; then
+  if ! GH_AUTH_OUTPUT=$(gh auth status 2>&1); then
+    echo "[prcheck] Error: gh is not authenticated. Run: gh auth login" >&2
+    exit 1
+  fi
 fi
 
 # Check that gh has the required 'repo' scope
-GH_SCOPES=$(gh auth status 2>&1 | grep -i "Token scopes:" | head -1 | sed "s/.*Token scopes: //; s/'//g")
+GH_SCOPES=$(echo "$GH_AUTH_OUTPUT" | grep -i "Token scopes:" | head -1 | sed "s/.*Token scopes: //; s/'//g")
 if [[ ! "$GH_SCOPES" =~ repo ]]; then
   echo "[prcheck] Error: gh token is missing the required 'repo' scope." >&2
   echo "[prcheck]        Current scopes: $GH_SCOPES" >&2
@@ -87,13 +114,15 @@ if [[ ! "$GH_SCOPES" =~ repo ]]; then
   echo "[prcheck]          - PR information and reviews" >&2
   echo "[prcheck]          - File viewer state (which files you've viewed)" >&2
   echo "[prcheck]        To refresh with correct scopes, run: gh auth refresh -s repo" >&2
+  # Invalidate any stale cache so the next run re-checks.
+  rm -f "$GH_AUTH_CACHE_FILE" 2>/dev/null || true
   exit 1
 fi
 
-# --- Resolve defaults (user, repo, label from env already handled) ---
-# Create a small cache for metadata like GH user (separate from API response cache)
-META_CACHE_DIR="/tmp/prcheck_cache"
-mkdir -p "$META_CACHE_DIR"
+# Persist a verified-good auth status so future runs can skip the gh call.
+if [ "$GH_AUTH_FROM_CACHE" = false ]; then
+  echo "$GH_AUTH_OUTPUT" > "$GH_AUTH_CACHE_FILE" 2>/dev/null || true
+fi
 
 # Extracted helpers to reduce nested conditionals
 resolve_gh_user() {
@@ -133,9 +162,9 @@ resolve_gh_user() {
     GH_USER=$(gh api user -q .login 2>/dev/null || true)
   fi
 
-  # Fallback: parse from gh auth status
+  # Fallback: parse from the already-captured gh auth status output
   if [ -z "${GH_USER}" ]; then
-    GH_USER=$(gh auth status 2>&1 | sed -n 's/.*Logged in to .* as \([^ ]*\).*/\1/p' | head -1 || true)
+    GH_USER=$(echo "${GH_AUTH_OUTPUT:-}" | sed -n 's/.*Logged in to .* as \([^ ]*\).*/\1/p' | head -1 || true)
   fi
 
   if [ -n "${GH_USER}" ]; then
@@ -236,16 +265,6 @@ GRAPHQL
 # --- Run and pretty-print ---
 # Columns: Title | Author | Type | URL | Updated (or Title | Author | Type | Updated when hyperlinks enabled)
 
-# Convert bash boolean to jq boolean
-# When JSON output is enabled, disable hyperlinks (escape codes don't make sense in JSON)
-if [ "$JSON_OUTPUT" = true ]; then
-  JQ_HYPERLINK_FLAG="false"
-elif [ "$TITLE_AS_HYPERLINK" = true ]; then
-  JQ_HYPERLINK_FLAG="true"
-else
-  JQ_HYPERLINK_FLAG="false"
-fi
-
 # Convert EXCLUDE_NON_DEFAULT_BASE to jq boolean
 if [ "$EXCLUDE_NON_DEFAULT_BASE" = true ]; then
   JQ_EXCLUDE_NON_DEFAULT_BASE="true"
@@ -253,13 +272,32 @@ else
   JQ_EXCLUDE_NON_DEFAULT_BASE="false"
 fi
 
+# Column widths for table output. Title is sized to fit the terminal.
+AUTHOR_W=18
+TYPE_W=14
+STATUS_W=32
+UPDATED_W=14
+# Frame overhead: 6 vertical separators + 5 * (2 padding spaces) = 16
+FRAME_OVERHEAD=16
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 120)
+TITLE_W=$((TERM_WIDTH - AUTHOR_W - TYPE_W - STATUS_W - UPDATED_W - FRAME_OVERHEAD))
+TITLE_MAX_W=80
+if [ "$TITLE_W" -gt "$TITLE_MAX_W" ]; then
+  TITLE_W=$TITLE_MAX_W
+elif [ "$TITLE_W" -lt 20 ]; then
+  TITLE_W=20
+fi
+
 # Cache (short TTL)
 CACHE_DIR="/tmp/prcheck_cache"
 CACHE_TTL="${PRCHECK_TTL:-8}"
 mkdir -p "$CACHE_DIR"
 
-# Cache key from query parameters
-CACHE_KEY=$(echo "${SEARCH_Q}|${LIMIT}|${GRAPHQL_QUERY}" | shasum -a 256 | cut -d' ' -f1)
+# Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
+# shape changes so stale caches are not reused.
+CACHE_VERSION=v2
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${INCLUDE_REVIEW_REQUESTED}|${EXCLUDE_NON_DEFAULT_BASE}"
+CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
 # Check if cache exists and is fresh (< $CACHE_TTL seconds old)
@@ -290,57 +328,179 @@ else
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
 fi
 
-# Process the response
-echo "$GRAPHQL_RESPONSE" \
-  | jq --arg useHyperlinks "$JQ_HYPERLINK_FLAG" --arg ghUser "$GH_USER" --arg authorsCsv "$AUTHORS" --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" '
-    (.data.search.nodes // [])
-    | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
-    | map(
-        . as $pr
-        | ($pr.reviews.nodes
-            | map(select(.author.login == $ghUser))
-            | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
-          ) as $myLastReview
-        | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
-        | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
-        | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewedFiles
-        | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
-        | ($myLastReview == null) as $neverReviewed
-        | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
-        | ($hasUnviewedInFirst100 or $filesHasMore) as $unviewedFlag
-        | (
-            $neverReviewed
-            or $newSinceReview
-            or $unviewedFlag
-          ) as $needsAttention
-        | select($needsAttention)
-        | (
-            if $newSinceReview then "New Commits"
-            elif $unviewedFlag then "Unviewed Files"
-            elif $neverReviewed then "Never Reviewed"
-            else "Unknown"
-            end
-          ) as $prType
-        | ((.updatedAt | fromdate) | strflocaltime("%Y-%m-%d %I:%M %p %Z")) as $updatedLocal
-        | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
-        | select((($pr.author.login // "unknown") != $ghUser))
-        | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
-        | select( ($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name) )
-        | if $useHyperlinks == "true" then
-            {
-              Title: ("\u001b]8;;" + .url + "\u001b\\" + .title + "\u001b]8;;\u001b\\"),
-              " Author": $author,
-              "  Type": $prType,
-              "   Updated": $updatedLocal
-            }
-          else
-            {
-              Title: (if (.title | length) > 50 then (.title[0:50] + "...") else .title end),
-              Author: $author,
-              Type: $prType,
-              URL: .url,
-              Updated: $updatedLocal
-            }
+# Shared jq pipeline: selects PRs that need attention and emits one object per PR
+# with the fields: title, url, author, type, updated. Truncation and hyperlink
+# wrapping are handled in bash afterward so terminal-escape codes don't break
+# column alignment.
+JQ_PROGRAM='
+  (.data.search.nodes // [])
+  | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
+  | map(
+      . as $pr
+      | ($pr.reviews.nodes
+          | map(select(.author.login == $ghUser))
+          | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
+        ) as $myLastReview
+      | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
+      | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
+      | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
+      | ($myLastReview == null) as $neverReviewed
+      | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
+      | ($hasUnviewedInFirst100 or $filesHasMore) as $unviewedFlag
+      | ($neverReviewed or $newSinceReview or $unviewedFlag) as $needsAttention
+      | select($needsAttention)
+      | (
+          if $newSinceReview then "New Commits"
+          elif $unviewedFlag then "Unviewed Files"
+          elif $neverReviewed then "Never Reviewed"
+          else "Unknown"
           end
-      )
-' | if [ "$JSON_OUTPUT" = true ]; then cat; else jtbl --fancy; fi
+        ) as $prType
+      | (
+          $pr.reviews.nodes
+          | map(select(.author != null))
+          | group_by(.author.login)
+          | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))
+        ) as $latestPerReviewer
+      | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
+      | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters
+      | ($latestPerReviewer | map(select(.state == "COMMENTED" or .state == "DISMISSED"))) as $commenters
+      | ($approvers        | map(select(.author.login != $ghUser)) | length) as $approversOthers
+      | ($commenters       | map(select(.author.login != $ghUser)) | length) as $commentersOthers
+      | ($changeRequesters | map(select(.author.login != $ghUser)) | length) as $changeRequestersOthers
+      | (
+          if $approversOthers > 0 then "Approved by \($approversOthers) Other(s)"
+          elif ($approvers | any(.author.login == $ghUser)) then "Approved by You"
+          elif $commentersOthers > 0 then "Reviewed by \($commentersOthers) Other(s)"
+          elif ($commenters | any(.author.login == $ghUser)) then "Reviewed by You"
+          elif $changeRequestersOthers > 0 then "Changes Requested by \($changeRequestersOthers) Other(s)"
+          elif ($changeRequesters | any(.author.login == $ghUser)) then "Changes Requested by You"
+          else "Unreviewed"
+          end
+        ) as $reviewStatus
+      | ((.updatedAt | fromdate) | strflocaltime("%-m/%-d %-I:%M %p")) as $updatedLocal
+      | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
+      | select((($pr.author.login // "unknown") != $ghUser))
+      | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
+      | select( ($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name) )
+      | (.title | gsub("[\\n\\r\\t]"; " ") | gsub(" +"; " ")) as $clean_title
+      | {
+          title: $clean_title,
+          url: .url,
+          author: $author,
+          type: $prType,
+          status: $reviewStatus,
+          updated: $updatedLocal
+        }
+    )
+'
+
+if [ "$JSON_OUTPUT" = true ]; then
+  echo "$GRAPHQL_RESPONSE" | jq \
+    --arg ghUser "$GH_USER" \
+    --arg authorsCsv "$AUTHORS" \
+    --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
+    "$JQ_PROGRAM"
+  exit 0
+fi
+
+# Table output: emit TSV rows (title<TAB>url<TAB>author<TAB>type<TAB>status<TAB>updated),
+# then render a fixed-width table in bash so ANSI hyperlink bytes don't distort
+# column widths.
+TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
+  --arg ghUser "$GH_USER" \
+  --arg authorsCsv "$AUTHORS" \
+  --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
+  "$JQ_PROGRAM"' | .[] | [.title, .url, .author, .type, .status, .updated] | @tsv')
+
+# Truncate a string to a visible width, appending "..." if cut. Writes the
+# result into the named variable (printf -v) to avoid a subshell per call.
+truncate_to_var() {
+  local __var=$1 s=$2 w=$3
+  if [ "${#s}" -gt "$w" ]; then
+    local keep=$(( w - 3 ))
+    [ "$keep" -lt 1 ] && keep=1
+    printf -v "$__var" '%s...' "${s:0:$keep}"
+  else
+    printf -v "$__var" '%s' "$s"
+  fi
+}
+
+# Repeat a character N times into a named variable (no subshell, no loop).
+repeat_to_var() {
+  local __var=$1 ch=$2 n=$3 tmp
+  printf -v tmp '%*s' "$n" ""
+  printf -v "$__var" '%s' "${tmp// /$ch}"
+}
+
+ESC=$'\033'
+RESET="${ESC}[0m"
+GREEN="${ESC}[32m"
+YELLOW="${ESC}[33m"
+RED="${ESC}[31m"
+
+repeat_to_var H_TITLE   "─" $((TITLE_W + 2))
+repeat_to_var H_AUTHOR  "─" $((AUTHOR_W + 2))
+repeat_to_var H_TYPE    "─" $((TYPE_W + 2))
+repeat_to_var H_STATUS  "─" $((STATUS_W + 2))
+repeat_to_var H_UPDATED "─" $((UPDATED_W + 2))
+
+print_border() {
+  local left="$1" mid="$2" right="$3"
+  printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
+    "$left" "$H_TITLE" "$mid" "$H_AUTHOR" "$mid" "$H_TYPE" "$mid" "$H_STATUS" "$mid" "$H_UPDATED" "$right"
+}
+
+print_border "┌" "┬" "┐"
+printf '│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n' \
+  "$TITLE_W" "Title" "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status" "$UPDATED_W" "Updated"
+print_border "├" "┼" "┤"
+
+ROW_COUNT=0
+if [ -n "$TSV_DATA" ]; then
+  while IFS=$'\t' read -r title url author prType status updated; do
+    [ -z "$title" ] && continue
+    ROW_COUNT=$((ROW_COUNT+1))
+    truncate_to_var title_disp "$title" "$TITLE_W"
+    truncate_to_var author_disp "$author" "$AUTHOR_W"
+    truncate_to_var type_disp "$prType" "$TYPE_W"
+    truncate_to_var status_disp "$status" "$STATUS_W"
+    truncate_to_var updated_disp "$updated" "$UPDATED_W"
+
+    # Build the title cell so its VISIBLE width is exactly TITLE_W, then wrap
+    # the visible text with OSC 8 hyperlink escapes (which take zero visible
+    # columns in terminals that support them).
+    title_pad_len=$((TITLE_W - ${#title_disp}))
+    printf -v title_pad '%*s' "$title_pad_len" ""
+    if [ "$TITLE_AS_HYPERLINK" = true ]; then
+      title_cell="${ESC}]8;;${url}${ESC}\\${title_disp}${ESC}]8;;${ESC}\\${title_pad}"
+    else
+      title_cell="${title_disp}${title_pad}"
+    fi
+
+    # Colorize the status cell based on category. ANSI color codes are zero-
+    # width in rendering, so pad to STATUS_W first, then wrap with color.
+    case "$status" in
+      "Approved"*)          status_color=$GREEN ;;
+      "Reviewed"*)          status_color=$YELLOW ;;
+      "Changes Requested"*) status_color=$RED ;;
+      *)                    status_color="" ;;
+    esac
+    status_pad_len=$((STATUS_W - ${#status_disp}))
+    printf -v status_pad '%*s' "$status_pad_len" ""
+    if [ -n "$status_color" ]; then
+      status_cell="${status_color}${status_disp}${RESET}${status_pad}"
+    else
+      status_cell="${status_disp}${status_pad}"
+    fi
+
+    printf '│ %b │ %-*s │ %-*s │ %b │ %-*s │\n' \
+      "$title_cell" \
+      "$AUTHOR_W" "$author_disp" \
+      "$TYPE_W" "$type_disp" \
+      "$status_cell" \
+      "$UPDATED_W" "$updated_disp"
+  done <<< "$TSV_DATA"
+fi
+
+print_border "└" "┴" "┘"

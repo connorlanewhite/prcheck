@@ -246,7 +246,7 @@ query($q: String!, $limit: Int!) {
         }
         reviews(last: 50) {
           nodes {
-            author { login }
+            author { login __typename }
             state
             submittedAt
           }
@@ -295,7 +295,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v3
+CACHE_VERSION=v4
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${INCLUDE_REVIEW_REQUESTED}|${EXCLUDE_NON_DEFAULT_BASE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -357,8 +357,16 @@ JQ_PROGRAM='
           end
         ) as $prType
       | (
+          # Exclude bot / GitHub App reviewers: they post review comments via
+          # CI (CodeRabbit, Sonar, etc.) and should not count as human vetting.
+          # Use the GraphQL __typename first, then fall back to the [bot] login
+          # suffix which covers Apps that still serialize as User.
           $pr.reviews.nodes
-          | map(select(.author != null))
+          | map(select(
+              .author != null
+              and ((.author.__typename // "") != "Bot")
+              and ((.author.login // "") | endswith("[bot]") | not)
+            ))
           | group_by(.author.login)
           | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))
         ) as $latestPerReviewer

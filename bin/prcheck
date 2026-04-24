@@ -295,7 +295,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v2
+CACHE_VERSION=v3
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${INCLUDE_REVIEW_REQUESTED}|${EXCLUDE_NON_DEFAULT_BASE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -368,16 +368,32 @@ JQ_PROGRAM='
       | ($approvers        | map(select(.author.login != $ghUser)) | length) as $approversOthers
       | ($commenters       | map(select(.author.login != $ghUser)) | length) as $commentersOthers
       | ($changeRequesters | map(select(.author.login != $ghUser)) | length) as $changeRequestersOthers
+      | ($approvers        | any(.author.login == $ghUser)) as $approvedByYou
+      | ($commenters       | any(.author.login == $ghUser)) as $commentedByYou
+      | ($changeRequesters | any(.author.login == $ghUser)) as $changesRequestedByYou
       | (
           if $approversOthers > 0 then "Approved by \($approversOthers) Other(s)"
-          elif ($approvers | any(.author.login == $ghUser)) then "Approved by You"
+          elif $approvedByYou then "Approved by You"
           elif $commentersOthers > 0 then "Reviewed by \($commentersOthers) Other(s)"
-          elif ($commenters | any(.author.login == $ghUser)) then "Reviewed by You"
+          elif $commentedByYou then "Reviewed by You"
           elif $changeRequestersOthers > 0 then "Changes Requested by \($changeRequestersOthers) Other(s)"
-          elif ($changeRequesters | any(.author.login == $ghUser)) then "Changes Requested by You"
+          elif $changesRequestedByYou then "Changes Requested by You"
           else "Unreviewed"
           end
         ) as $reviewStatus
+      | (
+          # Higher = more "done", safer to skip. Used only to pick a color in
+          # the renderer; not surfaced as a user-visible string.
+          if $changeRequestersOthers > 0 or $changesRequestedByYou then "changes_requested"
+          elif $approvedByYou then "vetted"
+          elif $approversOthers >= 2 and $commentersOthers == 0 then "vetted"
+          elif $approversOthers >= 1 and ($commentersOthers > 0) then "approved_mixed"
+          elif $approversOthers >= 2 then "approved"
+          elif $approversOthers == 1 then "approved_pale"
+          elif $commentersOthers > 0 or $commentedByYou then "commented"
+          else "unreviewed"
+          end
+        ) as $tone
       | ((.updatedAt | fromdate) | strflocaltime("%-m/%-d %-I:%M %p")) as $updatedLocal
       | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
       | select((($pr.author.login // "unknown") != $ghUser))
@@ -390,6 +406,7 @@ JQ_PROGRAM='
           author: $author,
           type: $prType,
           status: $reviewStatus,
+          tone: $tone,
           updated: $updatedLocal
         }
     )
@@ -411,7 +428,7 @@ TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg ghUser "$GH_USER" \
   --arg authorsCsv "$AUTHORS" \
   --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-  "$JQ_PROGRAM"' | .[] | [.title, .url, .author, .type, .status, .updated] | @tsv')
+  "$JQ_PROGRAM"' | .[] | [.title, .url, .author, .type, .status, .updated, .tone] | @tsv')
 
 # Truncate a string to a visible width, appending "..." if cut. Writes the
 # result into the named variable (printf -v) to avoid a subshell per call.
@@ -439,6 +456,41 @@ GREEN="${ESC}[32m"
 YELLOW="${ESC}[33m"
 RED="${ESC}[31m"
 
+# Pick a color for the Status cell based on the tone emitted by jq. On
+# truecolor terminals, use a GitHub-inspired ramp so that the amount of
+# independent vetting (and any dissent) is visible at a glance. On lesser
+# terminals, fall back to the original 3-color scheme.
+if [ "${COLORTERM:-}" = "truecolor" ] || [ "${COLORTERM:-}" = "24bit" ]; then
+  TONE_VETTED="${ESC}[38;2;35;197;84m"      # vibrant green
+  TONE_APPROVED="${ESC}[38;2;86;211;100m"   # green
+  TONE_APPROVED_PALE="${ESC}[38;2;126;231;135m"  # pale green
+  TONE_APPROVED_MIXED="${ESC}[38;2;166;183;113m" # olive
+  TONE_COMMENTED="${ESC}[38;2;227;179;65m"  # yellow
+  TONE_CHANGES="${ESC}[38;2;248;81;73m"     # red
+else
+  # 8-color fallback: preserve the original scheme exactly (any Approved* is
+  # green, Reviewed/commented is yellow, Changes Requested is red). The fine-
+  # grained ramp only activates on terminals that can render it.
+  TONE_VETTED=$GREEN
+  TONE_APPROVED=$GREEN
+  TONE_APPROVED_PALE=$GREEN
+  TONE_APPROVED_MIXED=$GREEN
+  TONE_COMMENTED=$YELLOW
+  TONE_CHANGES=$RED
+fi
+
+tone_color() {
+  case "$1" in
+    vetted)            printf '%s' "$TONE_VETTED" ;;
+    approved)          printf '%s' "$TONE_APPROVED" ;;
+    approved_pale)     printf '%s' "$TONE_APPROVED_PALE" ;;
+    approved_mixed)    printf '%s' "$TONE_APPROVED_MIXED" ;;
+    commented)         printf '%s' "$TONE_COMMENTED" ;;
+    changes_requested) printf '%s' "$TONE_CHANGES" ;;
+    *)                 printf '' ;;
+  esac
+}
+
 repeat_to_var H_TITLE   "─" $((TITLE_W + 2))
 repeat_to_var H_AUTHOR  "─" $((AUTHOR_W + 2))
 repeat_to_var H_TYPE    "─" $((TYPE_W + 2))
@@ -458,7 +510,7 @@ print_border "├" "┼" "┤"
 
 ROW_COUNT=0
 if [ -n "$TSV_DATA" ]; then
-  while IFS=$'\t' read -r title url author prType status updated; do
+  while IFS=$'\t' read -r title url author prType status updated tone; do
     [ -z "$title" ] && continue
     ROW_COUNT=$((ROW_COUNT+1))
     truncate_to_var title_disp "$title" "$TITLE_W"
@@ -478,14 +530,10 @@ if [ -n "$TSV_DATA" ]; then
       title_cell="${title_disp}${title_pad}"
     fi
 
-    # Colorize the status cell based on category. ANSI color codes are zero-
-    # width in rendering, so pad to STATUS_W first, then wrap with color.
-    case "$status" in
-      "Approved"*)          status_color=$GREEN ;;
-      "Reviewed"*)          status_color=$YELLOW ;;
-      "Changes Requested"*) status_color=$RED ;;
-      *)                    status_color="" ;;
-    esac
+    # Colorize the status cell based on the tone emitted by jq. ANSI color
+    # codes are zero-width in rendering, so pad to STATUS_W first, then wrap
+    # with color.
+    status_color=$(tone_color "$tone")
     status_pad_len=$((STATUS_W - ${#status_disp}))
     printf -v status_pad '%*s' "$status_pad_len" ""
     if [ -n "$status_color" ]; then

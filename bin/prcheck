@@ -6,7 +6,6 @@ LABEL="${PRCHECK_DEFAULT_LABEL:-}"      # default label comes from env; no defau
 NO_LABEL=false       # use -L / --no-label to ignore label filtering
 GH_USER=""                             # default: detect from gh auth (cached)
 LIMIT=50
-INCLUDE_REVIEW_REQUESTED=false
 TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
 JSON_OUTPUT=false  # use --json to output JSON instead of table
 # Comma-separated GitHub logins to include (empty means no author filtering)
@@ -28,7 +27,6 @@ Options:
   -a, --authors USER1,USER2       Comma-separated authors (GitHub logins) to include
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
-      --include-review-requested  Include PRs where you are review-requested
       --include-all-base-branches Include PRs targeting any base branch (default: only default branch)
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
@@ -37,7 +35,7 @@ Options:
 
 Examples:
   $0
-  $0 -r myorg/myrepo -l "Platform" -u myuser -n 100 --include-review-requested
+  $0 -r myorg/myrepo -l "Platform" -u myuser -n 100
   $0 -L
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
@@ -56,7 +54,9 @@ while [[ $# -gt 0 ]]; do
     -a|--authors) AUTHORS="$2"; shift 2;;
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
-    --include-review-requested) INCLUDE_REVIEW_REQUESTED=true; shift;;
+    # review-requested PRs are now unioned in by default; flag kept as a
+    # silent no-op so old invocations still parse.
+    --include-review-requested) shift;;
     --include-all-base-branches) EXCLUDE_NON_DEFAULT_BASE=false; shift;;
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
@@ -215,48 +215,56 @@ if [ -z "${LABEL}" ]; then
   NO_LABEL=true
 fi
 
-# --- Build search query string ---
-SEARCH_Q="repo:${REPO} is:pr is:open -is:draft"
+# --- Build search query strings ---
+# Primary query: the usual open-PR filter, optionally narrowed by label.
+# Secondary query: always fetch PRs where the user is explicitly review-
+# requested, regardless of label. The two result sets are unioned in jq so
+# that review-requested PRs outside your team's label still surface.
+SEARCH_Q_BASE="repo:${REPO} is:pr is:open -is:draft"
+
+SEARCH_Q="${SEARCH_Q_BASE}"
 if [ "$NO_LABEL" = false ]; then
   SEARCH_Q="${SEARCH_Q} label:\"${LABEL}\""
 fi
-if $INCLUDE_REVIEW_REQUESTED; then
-  SEARCH_Q="${SEARCH_Q} review-requested:${GH_USER}"
-fi
 SEARCH_Q="${SEARCH_Q} sort:updated-desc"
+
+SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} review-requested:${GH_USER} sort:updated-desc"
 
 # --- GraphQL query (single call) ---
 GRAPHQL_QUERY=$(cat <<'GRAPHQL'
-query($q: String!, $limit: Int!) {
-  search(query: $q, type: ISSUE, first: $limit) {
+query($q1: String!, $q2: String!, $limit: Int!) {
+  primary: search(query: $q1, type: ISSUE, first: $limit) {
+    nodes { ...prFields }
+  }
+  reviewRequested: search(query: $q2, type: ISSUE, first: $limit) {
+    nodes { ...prFields }
+  }
+}
+
+fragment prFields on PullRequest {
+  number
+  title
+  url
+  updatedAt
+  isDraft
+  baseRefName
+  repository {
+    defaultBranchRef { name }
+  }
+  author { login ... on User { name } }
+  commits(last: 10) {
+    nodes { commit { committedDate oid } }
+  }
+  reviews(last: 50) {
     nodes {
-      ... on PullRequest {
-        number
-        title
-        url
-        updatedAt
-        isDraft
-        baseRefName
-        repository {
-          defaultBranchRef { name }
-        }
-        author { login ... on User { name } }
-        commits(last: 10) {
-          nodes { commit { committedDate oid } }
-        }
-        reviews(last: 50) {
-          nodes {
-            author { login __typename }
-            state
-            submittedAt
-          }
-        }
-        files(first: 100) {
-          nodes { path viewerViewedState }
-          pageInfo { hasNextPage endCursor }
-        }
-      }
+      author { login __typename }
+      state
+      submittedAt
     }
+  }
+  files(first: 100) {
+    nodes { path viewerViewedState }
+    pageInfo { hasNextPage endCursor }
   }
 }
 GRAPHQL
@@ -295,8 +303,8 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v4
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${INCLUDE_REVIEW_REQUESTED}|${EXCLUDE_NON_DEFAULT_BASE}"
+CACHE_VERSION=v5
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
@@ -322,7 +330,8 @@ if [ "$USE_CACHE" = true ]; then
   GRAPHQL_RESPONSE=$(cat "$CACHE_FILE")
 else
   GRAPHQL_RESPONSE=$(gh api graphql \
-    -F q="$SEARCH_Q" \
+    -F q1="$SEARCH_Q" \
+    -F q2="$SEARCH_Q_REVIEW_REQUESTED" \
     -F limit="$LIMIT" \
     -f query="$GRAPHQL_QUERY")
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
@@ -333,7 +342,17 @@ fi
 # wrapping are handled in bash afterward so terminal-escape codes don't break
 # column alignment.
 JQ_PROGRAM='
-  (.data.search.nodes // [])
+  # Union the primary (label-filtered) results with the review-requested
+  # results, dedupe by PR number, and restore updated-desc ordering. Either
+  # query may be absent from the response on errors; default to [].
+  (
+    ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []))
+    | map(select(.number != null))
+    | group_by(.number)
+    | map(.[0])
+    | sort_by(.updatedAt)
+    | reverse
+  )
   | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
   | map(
       . as $pr

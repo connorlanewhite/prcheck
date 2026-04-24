@@ -20,6 +20,21 @@ By default, only PRs targeting the repository's default branch (e.g., `main` or 
 
 Run it from any GitHub repo; it'll auto-detect the repo and your username. Or point it at any repo you want with flags.
 
+## Status column colors
+
+On truecolor terminals, the Status column is shaded so you can tell at a glance how much independent review a PR has already received — the greener it is, the safer it is to skip.
+
+| Shade | Hex | When it appears |
+| --- | --- | --- |
+| Vibrant green | `#23c554` | You've approved it, or two or more others have approved with no outstanding feedback |
+| Pale green | `#7ee787` | Exactly one other reviewer has approved, nothing else |
+| Olive | `#a6b771` | Someone has approved, but there are unresolved comments |
+| Yellow | `#e3b341` | Only comments, no approvals yet |
+| Red | `#f85149` | Changes requested — even if some reviewers have also approved |
+| Default | — | No reviews yet |
+
+On 8-color terminals the shades collapse to the original scheme: any approval is green, comments are yellow, changes requested is red.
+
 ## Limitations
 
 Due to GitHub API pagination constraints, this tool has the following limitations:

@@ -20,6 +20,10 @@
 # Future local config
 .prcheck_config
 
+# Local Claude Code overrides
+CLAUDE.local.md
+.claude/settings.local.json
+
 # Other common files
 *.log
 .env

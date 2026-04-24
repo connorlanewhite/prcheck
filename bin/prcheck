@@ -542,7 +542,11 @@ if [ -n "$TSV_DATA" ]; then
       status_cell="${status_disp}${status_pad}"
     fi
 
-    printf '│ %b │ %-*s │ %-*s │ %b │ %-*s │\n' \
+    # Use %s (not %b) for cells that already contain literal ESC bytes: %b
+    # would re-interpret backslash sequences in the string, which breaks on
+    # titles starting with letters printf reserves as escape prefixes (\U, \u,
+    # \x, \e, \a, \b, \c, \f, \n, \r, \t, \v).
+    printf '│ %s │ %-*s │ %-*s │ %s │ %-*s │\n' \
       "$title_cell" \
       "$AUTHOR_W" "$author_disp" \
       "$TYPE_W" "$type_disp" \

@@ -12,6 +12,11 @@ JSON_OUTPUT=false  # use --json to output JSON instead of table
 AUTHORS="${PRCHECK_AUTHORS:-}"
 # Default: exclude PRs where base branch is not the repo's default branch
 EXCLUDE_NON_DEFAULT_BASE=true
+# Default: only union in PRs that directly request the user as a reviewer.
+# Team review requests (e.g. a large "Engineering" group) are excluded so the
+# list stays focused on PRs explicitly aimed at the user. Use
+# --include-team-review-requests to also include team-based requests.
+INCLUDE_TEAM_REVIEW_REQUESTS=false
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -28,6 +33,9 @@ Options:
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
       --include-all-base-branches Include PRs targeting any base branch (default: only default branch)
+      --include-team-review-requests
+                                  Also include PRs where review is requested via a team you belong to
+                                  (default: only direct/individual review requests)
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
   -j, --json                      Output JSON instead of table
@@ -58,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     # silent no-op so old invocations still parse.
     --include-review-requested) shift;;
     --include-all-base-branches) EXCLUDE_NON_DEFAULT_BASE=false; shift;;
+    --include-team-review-requests) INCLUDE_TEAM_REVIEW_REQUESTS=true; shift;;
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
@@ -220,6 +229,11 @@ fi
 # Secondary query: always fetch PRs where the user is explicitly review-
 # requested, regardless of label. The two result sets are unioned in jq so
 # that review-requested PRs outside your team's label still surface.
+#
+# By default we use `user-review-requested:` so that team-based requests
+# (e.g. a large "Engineering" group) don't drag in PRs that aren't really
+# pointed at the user. `--include-team-review-requests` switches to the
+# broader `review-requested:` qualifier which includes team membership.
 SEARCH_Q_BASE="repo:${REPO} is:pr is:open -is:draft"
 
 SEARCH_Q="${SEARCH_Q_BASE}"
@@ -228,7 +242,12 @@ if [ "$NO_LABEL" = false ]; then
 fi
 SEARCH_Q="${SEARCH_Q} sort:updated-desc"
 
-SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} review-requested:${GH_USER} sort:updated-desc"
+if [ "$INCLUDE_TEAM_REVIEW_REQUESTS" = true ]; then
+  REVIEW_REQUESTED_QUALIFIER="review-requested:${GH_USER}"
+else
+  REVIEW_REQUESTED_QUALIFIER="user-review-requested:${GH_USER}"
+fi
+SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:updated-desc"
 
 # --- GraphQL query (single call) ---
 GRAPHQL_QUERY=$(cat <<'GRAPHQL'
@@ -303,8 +322,8 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v5
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}"
+CACHE_VERSION=v6
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 

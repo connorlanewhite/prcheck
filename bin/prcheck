@@ -395,15 +395,17 @@ JQ_PROGRAM='
           end
         ) as $prType
       | (
-          # Exclude bot / GitHub App reviewers: they post review comments via
-          # CI (CodeRabbit, Sonar, etc.) and should not count as human vetting.
-          # Use the GraphQL __typename first, then fall back to the [bot] login
-          # suffix which covers Apps that still serialize as User.
+          # Exclude bot / GitHub App reviewers (they post review comments via
+          # CI like CodeRabbit, Sonar, etc.) and the PR author themselves
+          # (self-replies on the PR are not independent vetting). The
+          # __typename check catches Bots; the [bot] suffix is a fallback for
+          # Apps that still serialize as User.
           $pr.reviews.nodes
           | map(select(
               .author != null
               and ((.author.__typename // "") != "Bot")
               and ((.author.login // "") | endswith("[bot]") | not)
+              and ((.author.login // "") != ($pr.author.login // ""))
             ))
           | group_by(.author.login)
           | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))

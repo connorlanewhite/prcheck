@@ -39,6 +39,7 @@ Options:
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
   -j, --json                      Output JSON instead of table
+      --update                    Update prcheck to the latest version from GitHub
   -h, --help                      Show this help
 
 Examples:
@@ -51,6 +52,65 @@ Examples:
 
 Requires: gh (authenticated with repo scope), jq.
 EOF
+}
+
+# Self-update: fetch the latest bin/prcheck from GitHub main and replace this
+# script in-place. There is no version metadata in the repo, so "latest" means
+# whatever is currently on main. cmp -s short-circuits when the local file
+# already matches, so re-running is a no-op.
+self_update() {
+  local remote_url="https://raw.githubusercontent.com/connorlanewhite/prcheck/main/bin/prcheck"
+
+  command -v curl >/dev/null 2>&1 || {
+    echo "[prcheck] Error: curl is required for --update" >&2
+    exit 1
+  }
+
+  # Resolve the actual path of the running script. $0 may be a bare name
+  # ("prcheck") when invoked from PATH; command -v expands it.
+  local script_path
+  script_path=$(command -v -- "$0" 2>/dev/null || echo "$0")
+  case "$script_path" in
+    /*) ;;
+    *)  script_path="$(pwd)/$script_path" ;;
+  esac
+
+  if [ ! -f "$script_path" ]; then
+    echo "[prcheck] Error: could not locate the running script (looked at $script_path)" >&2
+    exit 1
+  fi
+
+  local install_dir
+  install_dir=$(dirname "$script_path")
+  if [ ! -w "$install_dir" ]; then
+    echo "[prcheck] Error: $install_dir is not writable. Re-run with sudo or reinstall via install.sh." >&2
+    exit 1
+  fi
+
+  # Stage the download alongside the destination so the final mv stays on the
+  # same filesystem (and is therefore atomic).
+  local tmpfile
+  tmpfile=$(mktemp "${install_dir}/prcheck.XXXXXX") || {
+    echo "[prcheck] Error: could not create temp file in $install_dir" >&2
+    exit 1
+  }
+  trap 'rm -f "$tmpfile"' EXIT
+
+  if ! curl -fsSL "$remote_url" -o "$tmpfile"; then
+    echo "[prcheck] Error: failed to download $remote_url" >&2
+    exit 1
+  fi
+
+  if cmp -s "$script_path" "$tmpfile"; then
+    echo "You're running the latest version."
+    exit 0
+  fi
+
+  chmod +x "$tmpfile"
+  mv "$tmpfile" "$script_path"
+  trap - EXIT
+  echo "Updated prcheck to the latest version."
+  exit 0
 }
 
 # --- Parse args ---
@@ -70,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
+    --update) self_update;;
     -h|--help) print_help; exit 0;;
     *) echo "[prcheck] Error: Unknown option: $1" >&2; print_help; exit 1;;
   esac

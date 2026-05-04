@@ -381,6 +381,7 @@ JQ_PROGRAM='
         ) as $myLastReview
       | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
       | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
+      | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewed
       | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
       | ($myLastReview == null) as $neverReviewed
       | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
@@ -388,7 +389,12 @@ JQ_PROGRAM='
       | ($neverReviewed or $newSinceReview or $unviewedFlag) as $needsAttention
       | select($needsAttention)
       | (
+          # "Unviewed Files" is reserved for PRs where review has actually
+          # started (some files marked viewed, some not). If no review has
+          # been submitted and no files are marked viewed, this PR has not
+          # been touched at all -- show "Never Reviewed" instead.
           if $newSinceReview then "New Commits"
+          elif $neverReviewed and ($hasAnyViewed | not) then "Never Reviewed"
           elif $unviewedFlag then "Unviewed Files"
           elif $neverReviewed then "Never Reviewed"
           else "Unknown"

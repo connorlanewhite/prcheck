@@ -28,3 +28,6 @@ CLAUDE.local.md
 *.log
 .env
 .env.local
+
+# ai related
+.codegraph

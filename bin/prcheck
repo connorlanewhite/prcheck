@@ -360,7 +360,8 @@ else
   JQ_EXCLUDE_NON_DEFAULT_BASE="false"
 fi
 
-# Column widths for table output. Title is sized to fit the terminal.
+# Column widths for table output. Title is sized from the terminal, with a
+# default floor so PR titles are still useful in narrower panes.
 AUTHOR_W=18
 TYPE_W=14
 STATUS_W=32
@@ -368,12 +369,16 @@ UPDATED_W=14
 # Frame overhead: 6 vertical separators + 5 * (2 padding spaces) = 16
 FRAME_OVERHEAD=16
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 120)
+TABLE_MIN_W=140
+if [ "$TERM_WIDTH" -lt "$TABLE_MIN_W" ]; then
+  TERM_WIDTH=$TABLE_MIN_W
+fi
 TITLE_W=$((TERM_WIDTH - AUTHOR_W - TYPE_W - STATUS_W - UPDATED_W - FRAME_OVERHEAD))
-TITLE_MAX_W=80
+TITLE_MAX_W=100
 if [ "$TITLE_W" -gt "$TITLE_MAX_W" ]; then
   TITLE_W=$TITLE_MAX_W
-elif [ "$TITLE_W" -lt 20 ]; then
-  TITLE_W=20
+elif [ "$TITLE_W" -lt 36 ]; then
+  TITLE_W=36
 fi
 
 # Cache (short TTL)

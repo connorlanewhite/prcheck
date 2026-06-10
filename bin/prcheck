@@ -295,9 +295,10 @@ fi
 # (e.g. a large "Engineering" group) don't drag in PRs that aren't really
 # pointed at the user. `--include-team-review-requests` switches to the
 # broader `review-requested:` qualifier which includes team membership.
-SEARCH_Q_BASE="repo:${REPO} is:pr is:open -is:draft"
+SEARCH_Q_BASE="repo:${REPO} is:pr is:open"
 
-SEARCH_Q="${SEARCH_Q_BASE}"
+# Drafts only surface via the review-requested query below, never the label one.
+SEARCH_Q="${SEARCH_Q_BASE} -is:draft"
 if [ "$NO_LABEL" = false ]; then
   SEARCH_Q="${SEARCH_Q} label:\"${LABEL}\""
 fi
@@ -308,6 +309,7 @@ if [ "$INCLUDE_TEAM_REVIEW_REQUESTS" = true ]; then
 else
   REVIEW_REQUESTED_QUALIFIER="user-review-requested:${GH_USER}"
 fi
+# Omits -is:draft so a draft you're specifically requested on still shows.
 SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:updated-desc"
 
 # --- GraphQL query (single call) ---
@@ -388,7 +390,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v6
+CACHE_VERSION=v7
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"

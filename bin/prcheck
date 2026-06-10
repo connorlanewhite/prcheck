@@ -312,13 +312,20 @@ fi
 # Omits -is:draft so a draft you're specifically requested on still shows.
 SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:updated-desc"
 
+# PRs you've already reviewed, regardless of label; the jq filter still drops
+# them once you've re-reviewed with no newer commits/files.
+SEARCH_Q_REVIEWED_BY="${SEARCH_Q_BASE} -is:draft reviewed-by:${GH_USER} sort:updated-desc"
+
 # --- GraphQL query (single call) ---
 GRAPHQL_QUERY=$(cat <<'GRAPHQL'
-query($q1: String!, $q2: String!, $limit: Int!) {
+query($q1: String!, $q2: String!, $q3: String!, $limit: Int!) {
   primary: search(query: $q1, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
   reviewRequested: search(query: $q2, type: ISSUE, first: $limit) {
+    nodes { ...prFields }
+  }
+  reviewedBy: search(query: $q3, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
 }
@@ -390,7 +397,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v7
+CACHE_VERSION=v8
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -419,6 +426,7 @@ else
   GRAPHQL_RESPONSE=$(gh api graphql \
     -F q1="$SEARCH_Q" \
     -F q2="$SEARCH_Q_REVIEW_REQUESTED" \
+    -F q3="$SEARCH_Q_REVIEWED_BY" \
     -F limit="$LIMIT" \
     -f query="$GRAPHQL_QUERY")
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
@@ -429,11 +437,11 @@ fi
 # wrapping are handled in bash afterward so terminal-escape codes don't break
 # column alignment.
 JQ_PROGRAM='
-  # Union the primary (label-filtered) results with the review-requested
-  # results, dedupe by PR number, and restore updated-desc ordering. Either
-  # query may be absent from the response on errors; default to [].
+  # Union the label, review-requested, and reviewed-by result sets, dedupe by
+  # PR number, and restore updated-desc ordering. Any query may be absent from
+  # the response on errors; default to [].
   (
-    ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []))
+    ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []))
     | map(select(.number != null))
     | group_by(.number)
     | map(.[0])

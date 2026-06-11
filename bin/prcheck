@@ -17,6 +17,8 @@ EXCLUDE_NON_DEFAULT_BASE=true
 # list stays focused on PRs explicitly aimed at the user. Use
 # --include-team-review-requests to also include team-based requests.
 INCLUDE_TEAM_REVIEW_REQUESTS=false
+# Only consider PRs opened within this many days (empty = no date filter).
+CREATED_WITHIN_DAYS=""
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -32,6 +34,7 @@ Options:
   -a, --authors USER1,USER2       Comma-separated authors (GitHub logins) to include
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
+      --created-within DAYS       Only PRs opened within the last DAYS days (e.g. 14 for two weeks)
       --include-all-base-branches Include PRs targeting any base branch (default: only default branch)
       --include-team-review-requests
                                   Also include PRs where review is requested via a team you belong to
@@ -48,6 +51,7 @@ Examples:
   $0 -L
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
+  $0 --created-within 14
   $0 --include-all-base-branches
 
 Requires: gh (authenticated with repo scope), jq.
@@ -122,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     -a|--authors) AUTHORS="$2"; shift 2;;
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
+    --created-within) CREATED_WITHIN_DAYS="$2"; shift 2;;
     # review-requested PRs are now unioned in by default; flag kept as a
     # silent no-op so old invocations still parse.
     --include-review-requested) shift;;
@@ -297,6 +302,20 @@ fi
 # broader `review-requested:` qualifier which includes team membership.
 SEARCH_Q_BASE="repo:${REPO} is:pr is:open"
 
+# Narrow all three searches to PRs opened within the last N days, if requested.
+if [ -n "$CREATED_WITHIN_DAYS" ]; then
+  case "$CREATED_WITHIN_DAYS" in
+    ''|*[!0-9]*) echo "[prcheck] Error: --created-within expects a positive integer (days)." >&2; exit 1;;
+  esac
+  # BSD (macOS) and GNU date take different relative-date flags.
+  if SINCE_DATE=$(date -v-"${CREATED_WITHIN_DAYS}"d +%Y-%m-%d 2>/dev/null); then
+    :
+  else
+    SINCE_DATE=$(date -d "${CREATED_WITHIN_DAYS} days ago" +%Y-%m-%d)
+  fi
+  SEARCH_Q_BASE="${SEARCH_Q_BASE} created:>=${SINCE_DATE}"
+fi
+
 # Drafts only surface via the review-requested query below, never the label one.
 SEARCH_Q="${SEARCH_Q_BASE} -is:draft"
 if [ "$NO_LABEL" = false ]; then
@@ -397,8 +416,8 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v8
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}"
+CACHE_VERSION=v9
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 

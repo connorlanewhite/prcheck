@@ -19,6 +19,9 @@ EXCLUDE_NON_DEFAULT_BASE=true
 INCLUDE_TEAM_REVIEW_REQUESTS=false
 # Only consider PRs opened within this many days (empty = no date filter).
 CREATED_WITHIN_DAYS=""
+# --request-review: request a review from GH_USER on each listed PR where they
+# aren't already a requested reviewer.
+REQUEST_REVIEW=false
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -35,6 +38,8 @@ Options:
   -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
   -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
       --created-within DAYS       Only PRs opened within the last DAYS days (e.g. 14 for two weeks)
+      --request-review            Request a review from your user on each listed PR
+                                  (skips PRs where you're already a requested reviewer)
       --include-all-base-branches Include PRs targeting any base branch (default: only default branch)
       --include-team-review-requests
                                   Also include PRs where review is requested via a team you belong to
@@ -52,6 +57,7 @@ Examples:
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
   $0 --created-within 14
+  $0 --created-within 14 --request-review
   $0 --include-all-base-branches
 
 Requires: gh (authenticated with repo scope), jq.
@@ -127,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
     --created-within) CREATED_WITHIN_DAYS="$2"; shift 2;;
+    --request-review) REQUEST_REVIEW=true; shift;;
     # review-requested PRs are now unioned in by default; flag kept as a
     # silent no-op so old invocations still parse.
     --include-review-requested) shift;;
@@ -370,6 +377,9 @@ fragment prFields on PullRequest {
       submittedAt
     }
   }
+  reviewRequests(first: 50) {
+    nodes { requestedReviewer { ... on User { login } } }
+  }
   files(first: 100) {
     nodes { path viewerViewedState }
     pageInfo { hasNextPage endCursor }
@@ -416,7 +426,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v9
+CACHE_VERSION=v10
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -548,18 +558,47 @@ JQ_PROGRAM='
       | select((($pr.author.login // "unknown") != $ghUser))
       | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
       | select( ($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name) )
+      | ($pr.reviewRequests.nodes | any(.requestedReviewer.login == $ghUser)) as $selfRequested
       | (.title | gsub("[\\n\\r\\t]"; " ") | gsub(" +"; " ")) as $clean_title
       | {
+          number: $pr.number,
           title: $clean_title,
           url: .url,
           author: $author,
           type: $prType,
           status: $reviewStatus,
           tone: $tone,
-          updated: $updatedLocal
+          updated: $updatedLocal,
+          selfRequested: $selfRequested
         }
     )
 '
+
+if [ "$REQUEST_REVIEW" = true ]; then
+  # Request a review from GH_USER on each listed PR, skipping any where they're
+  # already a requested reviewer. Reuses the same filtered set the table shows.
+  REQUEST_TARGETS=$(echo "$GRAPHQL_RESPONSE" | jq -r \
+    --arg ghUser "$GH_USER" \
+    --arg authorsCsv "$AUTHORS" \
+    --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
+    "$JQ_PROGRAM"' | .[] | select(.selfRequested | not) | "\(.number)\t\(.url)"')
+
+  if [ -z "$REQUEST_TARGETS" ]; then
+    echo "[prcheck] Nothing to do: you're already a requested reviewer on every listed PR (or none matched)."
+    exit 0
+  fi
+
+  while IFS=$'\t' read -r num url; do
+    [ -z "$num" ] && continue
+    if gh api -X POST "repos/${REPO}/pulls/${num}/requested_reviewers" \
+         -f "reviewers[]=${GH_USER}" >/dev/null 2>&1; then
+      echo "[prcheck] Requested review on #${num}: ${url}"
+    else
+      echo "[prcheck] Could not request review on #${num} (author, already requested, or no access): ${url}" >&2
+    fi
+  done <<< "$REQUEST_TARGETS"
+  exit 0
+fi
 
 if [ "$JSON_OUTPUT" = true ]; then
   echo "$GRAPHQL_RESPONSE" | jq \

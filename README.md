@@ -64,6 +64,12 @@ curl -fsSL https://raw.githubusercontent.com/connorlanewhite/prcheck/main/instal
 
 This will download and install prcheck to `~/.local/bin`. If prcheck is already installed, it will update to the latest version. Make sure `~/.local/bin` is in your PATH.
 
+To install zsh tab completion at the same time:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/connorlanewhite/prcheck/main/install.sh | bash -s -- --with-zsh-completion
+```
+
 Alternatively, you can manually download the script:
 
 ```bash
@@ -103,4 +109,12 @@ Common flags:
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
 - `--json` - output JSON instead of a table (also enables `--no-title-as-hyperlink`)
 
-Run `./prcheck.sh --help` for the full list of options.
+Zsh completion:
+```bash
+prcheck --install-zsh-completion
+prcheck --uninstall-zsh-completion
+mkdir -p ~/.local/share/zsh/site-functions
+prcheck --completion zsh > ~/.local/share/zsh/site-functions/_prcheck
+```
+
+Run `prcheck --help` for the full list of options.

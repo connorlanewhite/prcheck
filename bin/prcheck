@@ -52,6 +52,9 @@ Options:
       --no-title-as-hyperlink     Show URL as separate column
   -j, --json                      Output JSON instead of table
       --update                    Update prcheck to the latest version from GitHub
+      --completion zsh            Print zsh completion script
+      --install-zsh-completion    Install zsh completion to ~/.local/share/zsh/site-functions
+      --uninstall-zsh-completion  Remove installed zsh completion and managed ~/.zshrc block
   -h, --help                      Show this help
 
 Examples:
@@ -128,6 +131,262 @@ self_update() {
   exit 0
 }
 
+print_zsh_completion() {
+  cat <<'EOF'
+#compdef prcheck
+
+_prcheck() {
+  _arguments -s -S \
+    '(-r --repo)'{-r,--repo}'[Repository]:repository (OWNER/REPO):' \
+    '(-l --label)'{-l,--label}'[Filter by label]:label:' \
+    '(-L --no-label)'{-L,--no-label}'[Do not filter by label]' \
+    '(-a --authors)'{-a,--authors}'[Comma-separated authors to include]:authors:' \
+    '--no-approvals[Only show PRs without any approvals]' \
+    '(-u --user)'{-u,--user}'[GitHub username]:username:' \
+    '(-n --limit)'{-n,--limit}'[Max PRs to fetch]:limit:' \
+    '--created-within[Only PRs opened within the last N days]:days:' \
+    '--request-review[Request a review from your user on each listed PR]' \
+    '--include-all-base-branches[Include PRs targeting any base branch]' \
+    '--include-team-review-requests[Include team-based review requests]' \
+    '--title-as-hyperlink[Embed URL in title]' \
+    '--no-title-as-hyperlink[Show URL as a separate column]' \
+    '(-j --json)'{-j,--json}'[Output JSON instead of table]' \
+    '--update[Update prcheck to the latest version from GitHub]' \
+    '--completion[Print shell completion script]:shell:(zsh)' \
+    '--install-zsh-completion[Install zsh completion]' \
+    '--uninstall-zsh-completion[Uninstall zsh completion]' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+_prcheck "$@"
+EOF
+}
+
+zsh_quote() {
+  local value=$1
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "[prcheck] Error: zsh completion paths cannot contain newlines." >&2
+    exit 1
+  fi
+  value=${value//\'/\'\\\'\'}
+  printf "'%s'" "$value"
+}
+
+validate_zsh_completion_dir() {
+  local value=$1
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "[prcheck] Error: zsh completion paths cannot contain newlines." >&2
+    return 1
+  fi
+  case "$value" in
+    *'$('*|*'`'*)
+      echo "[prcheck] Error: zsh completion path contains shell command-substitution syntax." >&2
+      echo "[prcheck]        Choose a plain directory path and retry." >&2
+      return 1
+      ;;
+  esac
+}
+
+zsh_completion_rc_block() {
+  local completion_dir=$1
+  local begin_marker=$2
+  local end_marker=$3
+  local quoted_completion_dir
+
+  quoted_completion_dir=$(zsh_quote "$completion_dir")
+  cat <<EOF
+$begin_marker
+_prcheck_completion_dir=$quoted_completion_dir
+if [[ -d "\${_prcheck_completion_dir}" ]]; then
+  if (( \${fpath[(Ie)\${_prcheck_completion_dir}]} == 0 )); then
+    fpath=("\${_prcheck_completion_dir}" \$fpath)
+  fi
+  autoload -Uz compinit
+  if ! whence compdef >/dev/null 2>&1; then
+    compinit
+  fi
+  if whence compdef >/dev/null 2>&1; then
+    autoload -Uz _prcheck
+    compdef _prcheck prcheck
+  fi
+fi
+unset _prcheck_completion_dir
+$end_marker
+EOF
+}
+
+marker_count() {
+  local marker=$1
+  local file=$2
+  grep -Fxc "$marker" "$file" 2>/dev/null || true
+}
+
+write_zsh_completion_rc_block() {
+  local zshrc=$1
+  local completion_dir=$2
+  local begin_marker=$3
+  local end_marker=$4
+  local begin_count
+  local end_count
+
+  touch "$zshrc"
+  begin_count=$(marker_count "$begin_marker" "$zshrc")
+  end_count=$(marker_count "$end_marker" "$zshrc")
+
+  if [ "$begin_count" -eq 0 ] && [ "$end_count" -eq 0 ]; then
+    {
+      echo ""
+      zsh_completion_rc_block "$completion_dir" "$begin_marker" "$end_marker"
+    } >> "$zshrc"
+    return 0
+  fi
+
+  if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+    echo "[prcheck] Error: found a malformed prcheck completion block in $zshrc." >&2
+    echo "[prcheck]        Refusing to edit it automatically. Remove or repair the block and retry." >&2
+    return 1
+  fi
+
+  local block_file
+  local tmpfile
+  block_file=$(mktemp "${TMPDIR:-/tmp}/prcheck.zshrc-block.XXXXXX") || {
+    echo "[prcheck] Error: could not create temp file for zsh completion block" >&2
+    return 1
+  }
+  tmpfile=$(mktemp "${TMPDIR:-/tmp}/prcheck.zshrc.XXXXXX") || {
+    rm -f "$block_file"
+    echo "[prcheck] Error: could not create temp file for $zshrc" >&2
+    return 1
+  }
+
+  zsh_completion_rc_block "$completion_dir" "$begin_marker" "$end_marker" > "$block_file"
+  if awk -v begin="$begin_marker" -v end="$end_marker" -v block="$block_file" '
+      $0 == begin {
+        if (seen_begin) { bad = 1; exit }
+        seen_begin = 1
+        skip = 1
+        while ((getline line < block) > 0) print line
+        close(block)
+        next
+      }
+      $0 == end {
+        if (!skip) { bad = 1; exit }
+        skip = 0
+        next
+      }
+      !skip { print }
+      END {
+        if (!seen_begin || skip || bad) exit 1
+      }
+    ' "$zshrc" > "$tmpfile"; then
+    cat "$tmpfile" > "$zshrc"
+    rm -f "$block_file" "$tmpfile"
+    return 0
+  fi
+
+  rm -f "$block_file" "$tmpfile"
+  echo "[prcheck] Error: found a malformed prcheck completion block in $zshrc." >&2
+  echo "[prcheck]        Refusing to edit it automatically. Remove or repair the block and retry." >&2
+  return 1
+}
+
+remove_zsh_completion_rc_block() {
+  local zshrc=$1
+  local begin_marker=$2
+  local end_marker=$3
+  local begin_count
+  local end_count
+
+  if [ ! -f "$zshrc" ]; then
+    return 0
+  fi
+
+  begin_count=$(marker_count "$begin_marker" "$zshrc")
+  end_count=$(marker_count "$end_marker" "$zshrc")
+
+  if [ "$begin_count" -eq 0 ] && [ "$end_count" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+    echo "[prcheck] Error: found a malformed prcheck completion block in $zshrc." >&2
+    echo "[prcheck]        Refusing to edit it automatically. Remove or repair the block and retry." >&2
+    return 1
+  fi
+
+  local tmpfile
+  tmpfile=$(mktemp "${TMPDIR:-/tmp}/prcheck.zshrc.XXXXXX") || {
+    echo "[prcheck] Error: could not create temp file for $zshrc" >&2
+    return 1
+  }
+
+  if awk -v begin="$begin_marker" -v end="$end_marker" '
+      $0 == begin {
+        if (seen_begin) { bad = 1; exit }
+        seen_begin = 1
+        skip = 1
+        next
+      }
+      $0 == end {
+        if (!skip) { bad = 1; exit }
+        skip = 0
+        next
+      }
+      !skip { print }
+      END {
+        if (!seen_begin || skip || bad) exit 1
+      }
+    ' "$zshrc" > "$tmpfile"; then
+    cat "$tmpfile" > "$zshrc"
+    rm -f "$tmpfile"
+    return 0
+  fi
+
+  rm -f "$tmpfile"
+  echo "[prcheck] Error: found a malformed prcheck completion block in $zshrc." >&2
+  echo "[prcheck]        Refusing to edit it automatically. Remove or repair the block and retry." >&2
+  return 1
+}
+
+install_zsh_completion() {
+  local completion_dir="${PRCHECK_ZSH_COMPLETION_DIR:-${HOME}/.local/share/zsh/site-functions}"
+  local completion_file="${completion_dir}/_prcheck"
+  local zshrc="${PRCHECK_ZSHRC:-${HOME}/.zshrc}"
+  local begin_marker="# >>> prcheck zsh completion >>>"
+  local end_marker="# <<< prcheck zsh completion <<<"
+
+  validate_zsh_completion_dir "$completion_dir"
+
+  mkdir -p "$completion_dir"
+  print_zsh_completion > "$completion_file"
+
+  write_zsh_completion_rc_block "$zshrc" "$completion_dir" "$begin_marker" "$end_marker"
+  echo "Installed zsh completion to $completion_file"
+  echo "Updated $zshrc"
+  echo "Open a new zsh session or run: source $zshrc"
+}
+
+uninstall_zsh_completion() {
+  local completion_dir="${PRCHECK_ZSH_COMPLETION_DIR:-${HOME}/.local/share/zsh/site-functions}"
+  local completion_file="${completion_dir}/_prcheck"
+  local zshrc="${PRCHECK_ZSHRC:-${HOME}/.zshrc}"
+  local begin_marker="# >>> prcheck zsh completion >>>"
+  local end_marker="# <<< prcheck zsh completion <<<"
+
+  rm -f "$completion_file"
+
+  if [ -f "$zshrc" ] && {
+    [ "$(marker_count "$begin_marker" "$zshrc")" -gt 0 ] || [ "$(marker_count "$end_marker" "$zshrc")" -gt 0 ]
+  }; then
+    remove_zsh_completion_rc_block "$zshrc" "$begin_marker" "$end_marker"
+    echo "Removed zsh completion from $completion_file"
+    echo "Removed prcheck completion block from $zshrc"
+  else
+    echo "Removed zsh completion from $completion_file"
+    echo "No prcheck completion block found in $zshrc"
+  fi
+}
+
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -149,6 +408,17 @@ while [[ $# -gt 0 ]]; do
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
     --update) self_update;;
+    --completion)
+      case "${2:-}" in
+        zsh) print_zsh_completion; exit 0;;
+        "") echo "[prcheck] Error: --completion requires a shell name (supported: zsh)" >&2; exit 1;;
+        *) echo "[prcheck] Error: unsupported completion shell: $2 (supported: zsh)" >&2; exit 1;;
+      esac
+      ;;
+    --completion=zsh) print_zsh_completion; exit 0;;
+    --completion=*) echo "[prcheck] Error: unsupported completion shell: ${1#*=} (supported: zsh)" >&2; exit 1;;
+    --install-zsh-completion) install_zsh_completion; exit 0;;
+    --uninstall-zsh-completion) uninstall_zsh_completion; exit 0;;
     -h|--help) print_help; exit 0;;
     *) echo "[prcheck] Error: Unknown option: $1" >&2; print_help; exit 1;;
   esac

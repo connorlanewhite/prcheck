@@ -97,6 +97,7 @@ Common flags:
 - `-L` — disable label filtering
 - `-u USERNAME` — set your GitHub username explicitly
 - `-n NUMBER` — max PRs to fetch (default: 50)
+- `--no-approvals` — only show PRs without any approvals
 - `--include-review-requested` — also show PRs where you're tagged as a reviewer
 - `--include-all-base-branches` — include PRs targeting any base branch (default: only default branch)
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title

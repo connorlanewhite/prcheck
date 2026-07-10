@@ -42,13 +42,13 @@ print_help() {
 Usage: $0 [options]
 
 Options:
-  -r, --repo OWNER/REPO           Repository (default: \\${REPO:-auto})
+  -r, --repo OWNER/REPO           Repository (default: ${REPO:-auto})
   -l, --label LABEL               Filter by label (default: \$PRCHECK_DEFAULT_LABEL; none if unset)
   -L, --no-label                  Do not filter by label
   -a, --authors USER1,USER2       Comma-separated authors (GitHub logins) to include
       --no-approvals              Only show PRs without any approvals
-  -u, --user USERNAME             Your GitHub username (default: \\${GH_USER})
-  -n, --limit N                   Max PRs to fetch (default: \\${LIMIT})
+  -u, --user USERNAME             Your GitHub username (default: ${GH_USER:-auto})
+  -n, --limit N                   Max PRs to fetch (default: ${LIMIT})
       --created-within DAYS       Only PRs opened within the last DAYS days (e.g. 14 for two weeks)
       --request-review            Request a review from your user on each listed PR
                                   (skips PRs where you're already a requested reviewer)

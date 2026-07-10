@@ -35,12 +35,27 @@ On truecolor terminals, the Status column is shaded so you can tell at a glance 
 
 On 8-color terminals the shades collapse to the original scheme: any approval is green, comments are yellow, changes requested is red.
 
+## Greptile confidence
+
+Use `--greptile-confidence` to add Greptile's latest confidence score to the table. Set `PRCHECK_GREPTILE_CONFIDENCE=true` to enable the column by default.
+
+| Score | Color |
+| --- | --- |
+| 5/5 | Vibrant green |
+| 4/5 | Green |
+| 3/5 | Olive |
+| 2/5 | Yellow |
+| 1/5 | Red |
+
+The column displays `—` when Greptile has not reported a parseable score. JSON output includes the numeric score as `greptileConfidence`, or `null` when unavailable.
+
 ## Limitations
 
 Due to GitHub API pagination constraints, this tool has the following limitations:
 
 - **File checking**: Only the first 100 files per PR are fetched. If a PR has more than 100 files, the "Unviewed Files" indicator may not be accurate.
-- **Review history**: Only the first 50 most recent reviews per PR are checked. If a PR has more than 50 reviews and your review was earlier, it may be incorrectly flagged as "Never Reviewed".
+- **Review history**: Only the latest 50 reviews per PR are checked. If a PR has more than 50 reviews and your review was earlier, it may be incorrectly flagged as "Never Reviewed".
+- **Greptile confidence**: Only the latest 20 timeline comments and latest 50 reviews are checked for a score. An older Greptile summary may display `—`.
 
 For most PRs, these limits are sufficient. However, be aware of potential false positives on exceptionally large or heavily-reviewed PRs.
 
@@ -101,14 +116,17 @@ Common flags:
 - `-r OWNER/REPO` — specify a different repo
 - `-l LABEL` — filter by label
 - `-L` — disable label filtering
+- `-a USER1,USER2` — include only PRs from the listed authors
 - `-u USERNAME` — set your GitHub username explicitly
 - `-n NUMBER` — max PRs to fetch (default: 50)
 - `--no-approvals` — only show PRs without any approvals
-- `--include-review-requested` — also show PRs where you're tagged as a reviewer
+- `--created-within DAYS` — only show PRs opened within the last number of days
+- `--request-review` — request your review on each listed PR where it is not already requested
+- `--include-team-review-requests` — include team-based review requests in addition to direct requests
 - `--include-all-base-branches` — include PRs targeting any base branch (default: only default branch)
-- `--greptile-confidence` — add Greptile's latest confidence score, color-coded from red (1/5) to vibrant green (5/5)
+- `--greptile-confidence` — add Greptile's latest confidence score
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
-- `--json` - output JSON instead of a table (also enables `--no-title-as-hyperlink`)
+- `--json` — output JSON instead of a table
 
 Zsh completion:
 ```bash
@@ -119,5 +137,3 @@ prcheck --completion zsh > ~/.local/share/zsh/site-functions/_prcheck
 ```
 
 Run `prcheck --help` for the full list of options.
-
-Set `PRCHECK_GREPTILE_CONFIDENCE=true` to enable the Greptile column by default.

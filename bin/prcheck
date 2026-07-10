@@ -720,7 +720,7 @@ fi
 # default floor so PR titles are still useful in narrower panes.
 AUTHOR_W=18
 TYPE_W=14
-STATUS_W=32
+STATUS_W=24
 UPDATED_W=14
 GREPTILE_W=9
 TABLE_COLUMNS=5
@@ -911,7 +911,7 @@ JQ_PROGRAM='
           elif $approvedByYou then "Approved by You"
           elif $commentersOthers > 0 then "Reviewed by \($commentersOthers) Other(s)"
           elif $commentedByYou then "Reviewed by You"
-          elif $changeRequestersOthers > 0 then "Changes Requested by \($changeRequestersOthers) Other(s)"
+          elif $changeRequestersOthers > 0 then "Changes by \($changeRequestersOthers) Other(s)"
           elif $changesRequestedByYou then "Changes Requested by You"
           else "Unreviewed"
           end

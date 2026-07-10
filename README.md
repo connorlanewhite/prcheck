@@ -106,6 +106,7 @@ Common flags:
 - `--no-approvals` — only show PRs without any approvals
 - `--include-review-requested` — also show PRs where you're tagged as a reviewer
 - `--include-all-base-branches` — include PRs targeting any base branch (default: only default branch)
+- `--greptile-confidence` — add Greptile's latest confidence score, color-coded from red (1/5) to vibrant green (5/5)
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
 - `--json` - output JSON instead of a table (also enables `--no-title-as-hyperlink`)
 
@@ -118,3 +119,5 @@ prcheck --completion zsh > ~/.local/share/zsh/site-functions/_prcheck
 ```
 
 Run `prcheck --help` for the full list of options.
+
+Set `PRCHECK_GREPTILE_CONFIDENCE=true` to enable the Greptile column by default.

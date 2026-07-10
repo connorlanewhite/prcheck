@@ -25,6 +25,12 @@ CREATED_WITHIN_DAYS=""
 # --request-review: request a review from GH_USER on each listed PR where they
 # aren't already a requested reviewer.
 REQUEST_REVIEW=false
+# Show Greptile's latest reported confidence score as an extra table column.
+# Set PRCHECK_GREPTILE_CONFIDENCE=true to make this persistent.
+case "${PRCHECK_GREPTILE_CONFIDENCE:-false}" in
+  true|TRUE|1|yes|YES) SHOW_GREPTILE_CONFIDENCE=true ;;
+  *) SHOW_GREPTILE_CONFIDENCE=false ;;
+esac
 # internal flags to know whether user explicitly set values via CLI
 USER_SET=false
 REPO_SET=false
@@ -50,6 +56,7 @@ Options:
                                   (default: only direct/individual review requests)
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
+      --greptile-confidence       Show Greptile's latest confidence score
   -j, --json                      Output JSON instead of table
       --update                    Update prcheck to the latest version from GitHub
       --completion zsh            Print zsh completion script
@@ -64,6 +71,7 @@ Examples:
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
   $0 --no-approvals
+  $0 --greptile-confidence
   $0 --created-within 14
   $0 --created-within 14 --request-review
   $0 --include-all-base-branches
@@ -150,6 +158,7 @@ _prcheck() {
     '--include-team-review-requests[Include team-based review requests]' \
     '--title-as-hyperlink[Embed URL in title]' \
     '--no-title-as-hyperlink[Show URL as a separate column]' \
+    '--greptile-confidence[Show Greptile confidence score]' \
     '(-j --json)'{-j,--json}'[Output JSON instead of table]' \
     '--update[Update prcheck to the latest version from GitHub]' \
     '--completion[Print shell completion script]:shell:(zsh)' \
@@ -406,6 +415,7 @@ while [[ $# -gt 0 ]]; do
     --include-team-review-requests) INCLUDE_TEAM_REVIEW_REQUESTS=true; shift;;
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
+    --greptile-confidence) SHOW_GREPTILE_CONFIDENCE=true; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
     --update) self_update;;
     --completion)
@@ -611,6 +621,7 @@ if [ "$INCLUDE_TEAM_REVIEW_REQUESTS" = true ]; then
 else
   REVIEW_REQUESTED_QUALIFIER="user-review-requested:${GH_USER}"
 fi
+
 # Omits -is:draft so a draft you're specifically requested on still shows.
 SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:updated-desc"
 
@@ -649,6 +660,7 @@ fragment prFields on PullRequest {
   reviews(last: 50) {
     nodes {
       author { login __typename }
+      bodyText
       state
       submittedAt
     }
@@ -680,14 +692,22 @@ AUTHOR_W=18
 TYPE_W=14
 STATUS_W=32
 UPDATED_W=14
-# Frame overhead: 6 vertical separators + 5 * (2 padding spaces) = 16
-FRAME_OVERHEAD=16
+GREPTILE_W=9
+TABLE_COLUMNS=5
+TABLE_FIXED_W=$((AUTHOR_W + TYPE_W + STATUS_W + UPDATED_W))
+if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
+  TABLE_COLUMNS=6
+  TABLE_FIXED_W=$((TABLE_FIXED_W + GREPTILE_W))
+fi
+# One separator on each outer edge and between every pair of columns, plus two
+# padding spaces per column.
+FRAME_OVERHEAD=$((TABLE_COLUMNS + 1 + TABLE_COLUMNS * 2))
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 120)
 TABLE_MIN_W=140
 if [ "$TERM_WIDTH" -lt "$TABLE_MIN_W" ]; then
   TERM_WIDTH=$TABLE_MIN_W
 fi
-TITLE_W=$((TERM_WIDTH - AUTHOR_W - TYPE_W - STATUS_W - UPDATED_W - FRAME_OVERHEAD))
+TITLE_W=$((TERM_WIDTH - TABLE_FIXED_W - FRAME_OVERHEAD))
 TITLE_MAX_W=100
 if [ "$TITLE_W" -gt "$TITLE_MAX_W" ]; then
   TITLE_W=$TITLE_MAX_W
@@ -702,8 +722,8 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v10
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}"
+CACHE_VERSION=v11
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
@@ -797,6 +817,26 @@ JQ_PROGRAM='
           | group_by(.author.login)
           | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))
         ) as $latestPerReviewer
+      | (
+          # Greptile publishes this score in the body of its summary review.
+          # Only an exact Greptile login is parsed: arbitrary bot-review text
+          # is not a stable prcheck API.
+          $pr.reviews.nodes
+          | map(
+              select((.author.login // "") == "greptile-apps")
+              | . + {
+                  confidence: (
+                    try ((.bodyText // "")
+                      | capture("(?i)confidence[[:space:]]+score[[:space:]]*:[[:space:]]*(?<score>[1-5])[[:space:]]*/[[:space:]]*5").score
+                      | tonumber)
+                    catch null
+                  )
+                }
+            )
+          | map(select(.confidence != null))
+          | (if length == 0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
+        ) as $latestGreptileReview
+      | ($latestGreptileReview.confidence // null) as $greptileConfidence
       | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
       | select(($noApprovals == "false") or (($approvers | length) == 0))
       | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters
@@ -846,6 +886,7 @@ JQ_PROGRAM='
           status: $reviewStatus,
           tone: $tone,
           updated: $updatedLocal,
+          greptileConfidence: $greptileConfidence,
           selfRequested: $selfRequested
         }
     )
@@ -896,7 +937,7 @@ TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg authorsCsv "$AUTHORS" \
   --arg noApprovals "$NO_APPROVALS" \
   --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-  "$JQ_PROGRAM"' | .[] | [.title, .url, .author, .type, .status, .updated, .tone] | @tsv')
+  "$JQ_PROGRAM"' | .[] | [.title, .url, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "—" else "\(.greptileConfidence)/5" end)] | @tsv')
 
 # Truncate a string to a visible width, appending "..." if cut. Writes the
 # result into the named variable (printf -v) to avoid a subshell per call.
@@ -959,26 +1000,50 @@ tone_color() {
   esac
 }
 
+# Greptile's 1-5 confidence scale shares the status column's established
+# truecolor palette, with an 8-color fallback when truecolor is unavailable.
+greptile_confidence_color() {
+  case "$1" in
+    5/5) printf '%s' "$TONE_VETTED" ;;          # vibrant green
+    4/5) printf '%s' "$TONE_APPROVED" ;;         # good green
+    3/5) printf '%s' "$TONE_APPROVED_MIXED" ;;   # olive
+    2/5) printf '%s' "$TONE_COMMENTED" ;;        # yellow
+    1/5) printf '%s' "$TONE_CHANGES" ;;          # red
+    *) printf '' ;;
+  esac
+}
+
 repeat_to_var H_TITLE   "─" $((TITLE_W + 2))
 repeat_to_var H_AUTHOR  "─" $((AUTHOR_W + 2))
 repeat_to_var H_TYPE    "─" $((TYPE_W + 2))
 repeat_to_var H_STATUS  "─" $((STATUS_W + 2))
 repeat_to_var H_UPDATED "─" $((UPDATED_W + 2))
+repeat_to_var H_GREPTILE "─" $((GREPTILE_W + 2))
 
 print_border() {
   local left="$1" mid="$2" right="$3"
-  printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
-    "$left" "$H_TITLE" "$mid" "$H_AUTHOR" "$mid" "$H_TYPE" "$mid" "$H_STATUS" "$mid" "$H_UPDATED" "$right"
+  if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
+    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+      "$left" "$H_TITLE" "$mid" "$H_AUTHOR" "$mid" "$H_TYPE" "$mid" "$H_STATUS" "$mid" "$H_GREPTILE" "$mid" "$H_UPDATED" "$right"
+  else
+    printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
+      "$left" "$H_TITLE" "$mid" "$H_AUTHOR" "$mid" "$H_TYPE" "$mid" "$H_STATUS" "$mid" "$H_UPDATED" "$right"
+  fi
 }
 
 print_border "┌" "┬" "┐"
-printf '│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n' \
-  "$TITLE_W" "Title" "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status" "$UPDATED_W" "Updated"
+if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
+  printf '│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n' \
+    "$TITLE_W" "Title" "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status" "$GREPTILE_W" "Greptile" "$UPDATED_W" "Updated"
+else
+  printf '│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n' \
+    "$TITLE_W" "Title" "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status" "$UPDATED_W" "Updated"
+fi
 print_border "├" "┼" "┤"
 
 ROW_COUNT=0
 if [ -n "$TSV_DATA" ]; then
-  while IFS=$'\t' read -r title url author prType status updated tone; do
+  while IFS=$'\t' read -r title url author prType status updated tone greptileConfidence; do
     [ -z "$title" ] && continue
     ROW_COUNT=$((ROW_COUNT+1))
     truncate_to_var title_disp "$title" "$TITLE_W"
@@ -1010,16 +1075,35 @@ if [ -n "$TSV_DATA" ]; then
       status_cell="${status_disp}${status_pad}"
     fi
 
+    greptile_color=$(greptile_confidence_color "$greptileConfidence")
+    greptile_pad_len=$((GREPTILE_W - ${#greptileConfidence}))
+    printf -v greptile_pad '%*s' "$greptile_pad_len" ""
+    if [ -n "$greptile_color" ]; then
+      greptile_cell="${greptile_color}${greptileConfidence}${RESET}${greptile_pad}"
+    else
+      greptile_cell="${greptileConfidence}${greptile_pad}"
+    fi
+
     # Use %s (not %b) for cells that already contain literal ESC bytes: %b
     # would re-interpret backslash sequences in the string, which breaks on
     # titles starting with letters printf reserves as escape prefixes (\U, \u,
     # \x, \e, \a, \b, \c, \f, \n, \r, \t, \v).
-    printf '│ %s │ %-*s │ %-*s │ %s │ %-*s │\n' \
-      "$title_cell" \
-      "$AUTHOR_W" "$author_disp" \
-      "$TYPE_W" "$type_disp" \
-      "$status_cell" \
-      "$UPDATED_W" "$updated_disp"
+    if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
+      printf '│ %s │ %-*s │ %-*s │ %s │ %s │ %-*s │\n' \
+        "$title_cell" \
+        "$AUTHOR_W" "$author_disp" \
+        "$TYPE_W" "$type_disp" \
+        "$status_cell" \
+        "$greptile_cell" \
+        "$UPDATED_W" "$updated_disp"
+    else
+      printf '│ %s │ %-*s │ %-*s │ %s │ %-*s │\n' \
+        "$title_cell" \
+        "$AUTHOR_W" "$author_disp" \
+        "$TYPE_W" "$type_disp" \
+        "$status_cell" \
+        "$UPDATED_W" "$updated_disp"
+    fi
   done <<< "$TSV_DATA"
 fi
 

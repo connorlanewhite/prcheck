@@ -629,9 +629,17 @@ SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:u
 # them once you've re-reviewed with no newer commits/files.
 SEARCH_Q_REVIEWED_BY="${SEARCH_Q_BASE} -is:draft reviewed-by:${GH_USER} sort:updated-desc"
 
+# GitHub App comments require the app/ qualifier in issue search. Mirror each
+# candidate search so the Greptile-only result sets cannot add unrelated PRs
+# or lose older candidates behind a single broad search result limit.
+GREPTILE_COMMENTER="commenter:app/greptile-apps"
+SEARCH_Q_GREPTILE_PRIMARY="${SEARCH_Q} ${GREPTILE_COMMENTER}"
+SEARCH_Q_GREPTILE_REVIEW_REQUESTED="${SEARCH_Q_REVIEW_REQUESTED} ${GREPTILE_COMMENTER}"
+SEARCH_Q_GREPTILE_REVIEWED_BY="${SEARCH_Q_REVIEWED_BY} ${GREPTILE_COMMENTER}"
+
 # --- GraphQL query (single call) ---
 GRAPHQL_QUERY=$(cat <<'GRAPHQL'
-query($q1: String!, $q2: String!, $q3: String!, $limit: Int!) {
+query($q1: String!, $q2: String!, $q3: String!, $q4: String!, $q5: String!, $q6: String!, $limit: Int!, $includeGreptileConfidence: Boolean!) {
   primary: search(query: $q1, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
@@ -640,6 +648,15 @@ query($q1: String!, $q2: String!, $q3: String!, $limit: Int!) {
   }
   reviewedBy: search(query: $q3, type: ISSUE, first: $limit) {
     nodes { ...prFields }
+  }
+  greptilePrimary: search(query: $q4, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+    nodes { ...greptileFields }
+  }
+  greptileReviewRequested: search(query: $q5, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+    nodes { ...greptileFields }
+  }
+  greptileReviewedBy: search(query: $q6, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+    nodes { ...greptileFields }
   }
 }
 
@@ -671,6 +688,19 @@ fragment prFields on PullRequest {
   files(first: 100) {
     nodes { path viewerViewedState }
     pageInfo { hasNextPage endCursor }
+  }
+}
+
+fragment greptileFields on PullRequest {
+  number
+  # The companion searches already filter to Greptile-commented PRs, so this
+  # minimal fragment avoids re-fetching the full candidate data.
+  comments(last: 20) {
+    nodes {
+      author { login }
+      bodyText
+      createdAt
+    }
   }
 }
 GRAPHQL
@@ -722,7 +752,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v11
+CACHE_VERSION=v15
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -752,7 +782,11 @@ else
     -F q1="$SEARCH_Q" \
     -F q2="$SEARCH_Q_REVIEW_REQUESTED" \
     -F q3="$SEARCH_Q_REVIEWED_BY" \
+    -F q4="$SEARCH_Q_GREPTILE_PRIMARY" \
+    -F q5="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
+    -F q6="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
     -F limit="$LIMIT" \
+    -F includeGreptileConfidence="$SHOW_GREPTILE_CONFIDENCE" \
     -f query="$GRAPHQL_QUERY")
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
 fi
@@ -762,14 +796,42 @@ fi
 # wrapping are handled in bash afterward so terminal-escape codes don't break
 # column alignment.
 JQ_PROGRAM='
+  # Greptile puts its confidence score in a Markdown heading such as
+  # "Confidence Score: 5/5". Treat a changed or malformed format as absent.
+  def greptile_confidence_score:
+    try ((.bodyText // "")
+      | capture("(?i)confidence[[:space:]]+score[[:space:]]*:[[:space:]]*(?<score>[1-5])[[:space:]]*/[[:space:]]*5").score
+      | tonumber)
+    catch null;
+
   # Union the label, review-requested, and reviewed-by result sets, dedupe by
-  # PR number, and restore updated-desc ordering. Any query may be absent from
-  # the response on errors; default to [].
+  # PR number, and restore updated-desc ordering. Greptile companion searches
+  # only supply comments to those candidates; they never add output rows.
+  # Any query may be absent from the response on errors; default to [].
   (
-    ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []))
-    | map(select(.number != null))
-    | group_by(.number)
-    | map(.[0])
+    (
+      ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []))
+      | map(select(.number != null))
+      | group_by(.number)
+      | map(.[0])
+    ) as $candidates
+    | (
+        ((.data.greptilePrimary.nodes // [])
+          + (.data.greptileReviewRequested.nodes // [])
+          + (.data.greptileReviewedBy.nodes // []))
+        | map(select(.number != null))
+        | group_by(.number)
+        | map(.[0])
+        | INDEX(.number)
+      ) as $greptileByNumber
+    | $candidates
+    | map(
+        . as $candidate
+        | ($greptileByNumber[($candidate.number | tostring)] // null) as $greptile
+        | if $greptile == null then $candidate
+          else $candidate + {comments: ($greptile.comments // {nodes: []})}
+          end
+      )
     | sort_by(.updatedAt)
     | reverse
   )
@@ -818,25 +880,22 @@ JQ_PROGRAM='
           | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))
         ) as $latestPerReviewer
       | (
-          # Greptile publishes this score in the body of its summary review.
-          # Only an exact Greptile login is parsed: arbitrary bot-review text
-          # is not a stable prcheck API.
-          $pr.reviews.nodes
-          | map(
-              select((.author.login // "") == "greptile-apps")
-              | . + {
-                  confidence: (
-                    try ((.bodyText // "")
-                      | capture("(?i)confidence[[:space:]]+score[[:space:]]*:[[:space:]]*(?<score>[1-5])[[:space:]]*/[[:space:]]*5").score
-                      | tonumber)
-                    catch null
-                  )
-                }
-            )
+          # Only an exact Greptile login is parsed: arbitrary bot-comment
+          # text is not a stable prcheck API. Use the newest valid score
+          # whether Greptile supplied it as a review or timeline comment.
+          [
+            ($pr.reviews.nodes
+              | map(select((.author.login // "") == "greptile-apps")
+                    | { confidence: greptile_confidence_score, at: (.submittedAt // "1970-01-01T00:00:00Z") })),
+            (($pr.comments.nodes // [])
+              | map(select((.author.login // "") == "greptile-apps")
+                    | { confidence: greptile_confidence_score, at: (.createdAt // "1970-01-01T00:00:00Z") }))
+          ]
+          | add
           | map(select(.confidence != null))
-          | (if length == 0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
-        ) as $latestGreptileReview
-      | ($latestGreptileReview.confidence // null) as $greptileConfidence
+          | (if length == 0 then null else max_by(.at) end)
+        ) as $latestGreptileScore
+      | ($latestGreptileScore.confidence // null) as $greptileConfidence
       | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
       | select(($noApprovals == "false") or (($approvers | length) == 0))
       | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters

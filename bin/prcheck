@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO=""                                # default: detect from current repo
-LABEL="${PRCHECK_DEFAULT_LABEL:-}"      # default label comes from env; no default when unset
-NO_LABEL=false       # use -L / --no-label to ignore label filtering
-GH_USER=""                             # default: detect from gh auth (cached)
+# Query and identity defaults. Empty repo/user values are resolved from gh.
+REPO=""
+GH_USER=""
+LABEL="${PRCHECK_DEFAULT_LABEL:-}"
+NO_LABEL=false
 LIMIT=50
-TITLE_AS_HYPERLINK=true  # use --no-title-as-hyperlink to disable hyperlinks
-JSON_OUTPUT=false  # use --json to output JSON instead of table
-# Comma-separated GitHub logins to include (empty means no author filtering)
-AUTHORS="${PRCHECK_AUTHORS:-}"
+AUTHORS="${PRCHECK_AUTHORS:-}"  # comma-separated GitHub logins
+
+# Output and action flags.
+TITLE_AS_HYPERLINK=true
+JSON_OUTPUT=false
+REQUEST_REVIEW=false
+
 # Only show PRs with no meaningful approvals (bots/apps and PR-author reviews
 # are ignored the same way the Status column ignores them).
 NO_APPROVALS=false
@@ -22,16 +26,14 @@ EXCLUDE_NON_DEFAULT_BASE=true
 INCLUDE_TEAM_REVIEW_REQUESTS=false
 # Only consider PRs opened within this many days (empty = no date filter).
 CREATED_WITHIN_DAYS=""
-# --request-review: request a review from GH_USER on each listed PR where they
-# aren't already a requested reviewer.
-REQUEST_REVIEW=false
+
 # Show Greptile's latest reported confidence score as an extra table column.
 # Set PRCHECK_GREPTILE_CONFIDENCE=true to make this persistent.
 case "${PRCHECK_GREPTILE_CONFIDENCE:-false}" in
   true|TRUE|1|yes|YES) SHOW_GREPTILE_CONFIDENCE=true ;;
   *) SHOW_GREPTILE_CONFIDENCE=false ;;
 esac
-# internal flags to know whether user explicitly set values via CLI
+# Track whether identity values came from the CLI rather than auto-detection.
 USER_SET=false
 REPO_SET=false
 
@@ -639,23 +641,44 @@ SEARCH_Q_GREPTILE_REVIEWED_BY="${SEARCH_Q_REVIEWED_BY} ${GREPTILE_COMMENTER}"
 
 # --- GraphQL query (single call) ---
 GRAPHQL_QUERY=$(cat <<'GRAPHQL'
-query($q1: String!, $q2: String!, $q3: String!, $q4: String!, $q5: String!, $q6: String!, $limit: Int!, $includeGreptileConfidence: Boolean!) {
-  primary: search(query: $q1, type: ISSUE, first: $limit) {
+query(
+  $primaryQuery: String!
+  $reviewRequestedQuery: String!
+  $reviewedByQuery: String!
+  $greptilePrimaryQuery: String!
+  $greptileReviewRequestedQuery: String!
+  $greptileReviewedByQuery: String!
+  $limit: Int!
+  $includeGreptileConfidence: Boolean!
+) {
+  primary: search(query: $primaryQuery, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
-  reviewRequested: search(query: $q2, type: ISSUE, first: $limit) {
+  reviewRequested: search(query: $reviewRequestedQuery, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
-  reviewedBy: search(query: $q3, type: ISSUE, first: $limit) {
+  reviewedBy: search(query: $reviewedByQuery, type: ISSUE, first: $limit) {
     nodes { ...prFields }
   }
-  greptilePrimary: search(query: $q4, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+  greptilePrimary: search(
+    query: $greptilePrimaryQuery
+    type: ISSUE
+    first: $limit
+  ) @include(if: $includeGreptileConfidence) {
     nodes { ...greptileFields }
   }
-  greptileReviewRequested: search(query: $q5, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+  greptileReviewRequested: search(
+    query: $greptileReviewRequestedQuery
+    type: ISSUE
+    first: $limit
+  ) @include(if: $includeGreptileConfidence) {
     nodes { ...greptileFields }
   }
-  greptileReviewedBy: search(query: $q6, type: ISSUE, first: $limit) @include(if: $includeGreptileConfidence) {
+  greptileReviewedBy: search(
+    query: $greptileReviewedByQuery
+    type: ISSUE
+    first: $limit
+  ) @include(if: $includeGreptileConfidence) {
     nodes { ...greptileFields }
   }
 }
@@ -665,19 +688,18 @@ fragment prFields on PullRequest {
   title
   url
   updatedAt
-  isDraft
   baseRefName
   repository {
     defaultBranchRef { name }
   }
   author { login ... on User { name } }
   commits(last: 10) {
-    nodes { commit { committedDate oid } }
+    nodes { commit { committedDate } }
   }
   reviews(last: 50) {
     nodes {
       author { login __typename }
-      bodyText
+      bodyText @include(if: $includeGreptileConfidence)
       state
       submittedAt
     }
@@ -686,8 +708,8 @@ fragment prFields on PullRequest {
     nodes { requestedReviewer { ... on User { login } } }
   }
   files(first: 100) {
-    nodes { path viewerViewedState }
-    pageInfo { hasNextPage endCursor }
+    nodes { viewerViewedState }
+    pageInfo { hasNextPage }
   }
 }
 
@@ -706,8 +728,7 @@ fragment greptileFields on PullRequest {
 GRAPHQL
 )
 
-# --- Run and pretty-print ---
-# Columns: Title | Author | Type | URL | Updated (or Title | Author | Type | Updated when hyperlinks enabled)
+# --- Fetch and transform ---
 
 # Convert EXCLUDE_NON_DEFAULT_BASE to jq boolean
 if [ "$EXCLUDE_NON_DEFAULT_BASE" = true ]; then
@@ -752,7 +773,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v15
+CACHE_VERSION=v16
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -779,23 +800,47 @@ if [ "$USE_CACHE" = true ]; then
   GRAPHQL_RESPONSE=$(cat "$CACHE_FILE")
 else
   GRAPHQL_RESPONSE=$(gh api graphql \
-    -F q1="$SEARCH_Q" \
-    -F q2="$SEARCH_Q_REVIEW_REQUESTED" \
-    -F q3="$SEARCH_Q_REVIEWED_BY" \
-    -F q4="$SEARCH_Q_GREPTILE_PRIMARY" \
-    -F q5="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
-    -F q6="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
+    -F primaryQuery="$SEARCH_Q" \
+    -F reviewRequestedQuery="$SEARCH_Q_REVIEW_REQUESTED" \
+    -F reviewedByQuery="$SEARCH_Q_REVIEWED_BY" \
+    -F greptilePrimaryQuery="$SEARCH_Q_GREPTILE_PRIMARY" \
+    -F greptileReviewRequestedQuery="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
+    -F greptileReviewedByQuery="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
     -F limit="$LIMIT" \
     -F includeGreptileConfidence="$SHOW_GREPTILE_CONFIDENCE" \
     -f query="$GRAPHQL_QUERY")
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
 fi
 
-# Shared jq pipeline: selects PRs that need attention and emits one object per PR
-# with the fields: title, url, author, type, updated. Truncation and hyperlink
-# wrapping are handled in bash afterward so terminal-escape codes don't break
-# column alignment.
+# Shared jq pipeline: selects PRs that need attention and emits the normalized
+# fields consumed by JSON output, review requests, and the table renderer.
 JQ_PROGRAM='
+  def unique_prs:
+    map(select(.number != null))
+    | group_by(.number)
+    | map(.[0]);
+
+  def latest_review_by($login):
+    .reviews.nodes
+    | map(select(.author.login == $login))
+    | if length == 0 then null
+      else max_by(.submittedAt // "1970-01-01T00:00:00Z")
+      end;
+
+  # Keep one current review state per independent human reviewer. Bot/App
+  # activity and replies from the PR author are not independent vetting.
+  def latest_independent_reviews:
+    . as $pr
+    | $pr.reviews.nodes
+    | map(select(
+        .author != null
+        and ((.author.__typename // "") != "Bot")
+        and ((.author.login // "") | endswith("[bot]") | not)
+        and ((.author.login // "") != ($pr.author.login // ""))
+      ))
+    | group_by(.author.login)
+    | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"));
+
   # Greptile puts its confidence score in a Markdown heading such as
   # "Confidence Score: 5/5". Treat a changed or malformed format as absent.
   def greptile_confidence_score:
@@ -804,6 +849,22 @@ JQ_PROGRAM='
       | tonumber)
     catch null;
 
+  # Greptile has used both review bodies and timeline comments for summaries.
+  # Prefer the newest valid score across both sources.
+  def latest_greptile_confidence:
+    [
+      (.reviews.nodes[]?
+        | select((.author.login // "") == "greptile-apps")
+        | { confidence: greptile_confidence_score, at: (.submittedAt // "1970-01-01T00:00:00Z") }),
+      (.comments.nodes[]?
+        | select((.author.login // "") == "greptile-apps")
+        | { confidence: greptile_confidence_score, at: (.createdAt // "1970-01-01T00:00:00Z") })
+    ]
+    | map(select(.confidence != null))
+    | if length == 0 then null
+      else max_by(.at).confidence
+      end;
+
   # Union the label, review-requested, and reviewed-by result sets, dedupe by
   # PR number, and restore updated-desc ordering. Greptile companion searches
   # only supply comments to those candidates; they never add output rows.
@@ -811,17 +872,13 @@ JQ_PROGRAM='
   (
     (
       ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []))
-      | map(select(.number != null))
-      | group_by(.number)
-      | map(.[0])
+      | unique_prs
     ) as $candidates
     | (
         ((.data.greptilePrimary.nodes // [])
           + (.data.greptileReviewRequested.nodes // [])
           + (.data.greptileReviewedBy.nodes // []))
-        | map(select(.number != null))
-        | group_by(.number)
-        | map(.[0])
+        | unique_prs
         | INDEX(.number)
       ) as $greptileByNumber
     | $candidates
@@ -835,13 +892,17 @@ JQ_PROGRAM='
     | sort_by(.updatedAt)
     | reverse
   )
-  | ( if $authorsCsv == "" then [] else ($authorsCsv | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))) end ) as $authors
+  | (
+      if $authorsCsv == "" then []
+      else ($authorsCsv
+        | split(",")
+        | map(gsub("^\\s+|\\s+$"; ""))
+        | map(select(. != "")))
+      end
+    ) as $authors
   | map(
       . as $pr
-      | ($pr.reviews.nodes
-          | map(select(.author.login == $ghUser))
-          | (if length==0 then null else max_by(.submittedAt // "1970-01-01T00:00:00Z") end)
-        ) as $myLastReview
+      | ($pr | latest_review_by($ghUser)) as $myLastReview
       | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
       | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
       | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewed
@@ -863,39 +924,8 @@ JQ_PROGRAM='
           else "Unknown"
           end
         ) as $prType
-      | (
-          # Exclude bot / GitHub App reviewers (they post review comments via
-          # CI like CodeRabbit, Sonar, etc.) and the PR author themselves
-          # (self-replies on the PR are not independent vetting). The
-          # __typename check catches Bots; the [bot] suffix is a fallback for
-          # Apps that still serialize as User.
-          $pr.reviews.nodes
-          | map(select(
-              .author != null
-              and ((.author.__typename // "") != "Bot")
-              and ((.author.login // "") | endswith("[bot]") | not)
-              and ((.author.login // "") != ($pr.author.login // ""))
-            ))
-          | group_by(.author.login)
-          | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"))
-        ) as $latestPerReviewer
-      | (
-          # Only an exact Greptile login is parsed: arbitrary bot-comment
-          # text is not a stable prcheck API. Use the newest valid score
-          # whether Greptile supplied it as a review or timeline comment.
-          [
-            ($pr.reviews.nodes
-              | map(select((.author.login // "") == "greptile-apps")
-                    | { confidence: greptile_confidence_score, at: (.submittedAt // "1970-01-01T00:00:00Z") })),
-            (($pr.comments.nodes // [])
-              | map(select((.author.login // "") == "greptile-apps")
-                    | { confidence: greptile_confidence_score, at: (.createdAt // "1970-01-01T00:00:00Z") }))
-          ]
-          | add
-          | map(select(.confidence != null))
-          | (if length == 0 then null else max_by(.at) end)
-        ) as $latestGreptileScore
-      | ($latestGreptileScore.confidence // null) as $greptileConfidence
+      | ($pr | latest_independent_reviews) as $latestPerReviewer
+      | ($pr | latest_greptile_confidence) as $greptileConfidence
       | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
       | select(($noApprovals == "false") or (($approvers | length) == 0))
       | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters
@@ -988,9 +1018,8 @@ if [ "$JSON_OUTPUT" = true ]; then
   exit 0
 fi
 
-# Table output: emit TSV rows (title<TAB>url<TAB>author<TAB>type<TAB>status<TAB>updated),
-# then render a fixed-width table in bash so ANSI hyperlink bytes don't distort
-# column widths.
+# Table output: emit normalized TSV rows, then render fixed-width cells in Bash
+# so ANSI hyperlink and color escape bytes do not distort column widths.
 TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg ghUser "$GH_USER" \
   --arg authorsCsv "$AUTHORS" \
@@ -1047,29 +1076,39 @@ else
   TONE_CHANGES=$RED
 fi
 
-tone_color() {
-  case "$1" in
-    vetted)            printf '%s' "$TONE_VETTED" ;;
-    approved)          printf '%s' "$TONE_APPROVED" ;;
-    approved_pale)     printf '%s' "$TONE_APPROVED_PALE" ;;
-    approved_mixed)    printf '%s' "$TONE_APPROVED_MIXED" ;;
-    commented)         printf '%s' "$TONE_COMMENTED" ;;
-    changes_requested) printf '%s' "$TONE_CHANGES" ;;
-    *)                 printf '' ;;
+# Assign colors with printf -v so rendering does not spawn a command-
+# substitution subshell for every cell in every row.
+tone_color_to_var() {
+  local output_var=$1
+  local tone=$2
+  local color=""
+
+  case "$tone" in
+    vetted)            color=$TONE_VETTED ;;
+    approved)          color=$TONE_APPROVED ;;
+    approved_pale)     color=$TONE_APPROVED_PALE ;;
+    approved_mixed)    color=$TONE_APPROVED_MIXED ;;
+    commented)         color=$TONE_COMMENTED ;;
+    changes_requested) color=$TONE_CHANGES ;;
   esac
+  printf -v "$output_var" '%s' "$color"
 }
 
 # Greptile's 1-5 confidence scale shares the status column's established
 # truecolor palette, with an 8-color fallback when truecolor is unavailable.
-greptile_confidence_color() {
-  case "$1" in
-    5/5) printf '%s' "$TONE_VETTED" ;;          # vibrant green
-    4/5) printf '%s' "$TONE_APPROVED" ;;         # good green
-    3/5) printf '%s' "$TONE_APPROVED_MIXED" ;;   # olive
-    2/5) printf '%s' "$TONE_COMMENTED" ;;        # yellow
-    1/5) printf '%s' "$TONE_CHANGES" ;;          # red
-    *) printf '' ;;
+greptile_confidence_color_to_var() {
+  local output_var=$1
+  local score=$2
+  local color=""
+
+  case "$score" in
+    5/5) color=$TONE_VETTED ;;          # vibrant green
+    4/5) color=$TONE_APPROVED ;;         # good green
+    3/5) color=$TONE_APPROVED_MIXED ;;   # olive
+    2/5) color=$TONE_COMMENTED ;;        # yellow
+    1/5) color=$TONE_CHANGES ;;          # red
   esac
+  printf -v "$output_var" '%s' "$color"
 }
 
 repeat_to_var H_TITLE   "─" $((TITLE_W + 2))
@@ -1100,11 +1139,9 @@ else
 fi
 print_border "├" "┼" "┤"
 
-ROW_COUNT=0
 if [ -n "$TSV_DATA" ]; then
   while IFS=$'\t' read -r title url author prType status updated tone greptileConfidence; do
     [ -z "$title" ] && continue
-    ROW_COUNT=$((ROW_COUNT+1))
     truncate_to_var title_disp "$title" "$TITLE_W"
     truncate_to_var author_disp "$author" "$AUTHOR_W"
     truncate_to_var type_disp "$prType" "$TYPE_W"
@@ -1125,7 +1162,7 @@ if [ -n "$TSV_DATA" ]; then
     # Colorize the status cell based on the tone emitted by jq. ANSI color
     # codes are zero-width in rendering, so pad to STATUS_W first, then wrap
     # with color.
-    status_color=$(tone_color "$tone")
+    tone_color_to_var status_color "$tone"
     status_pad_len=$((STATUS_W - ${#status_disp}))
     printf -v status_pad '%*s' "$status_pad_len" ""
     if [ -n "$status_color" ]; then
@@ -1134,20 +1171,20 @@ if [ -n "$TSV_DATA" ]; then
       status_cell="${status_disp}${status_pad}"
     fi
 
-    greptile_color=$(greptile_confidence_color "$greptileConfidence")
-    greptile_pad_len=$((GREPTILE_W - ${#greptileConfidence}))
-    printf -v greptile_pad '%*s' "$greptile_pad_len" ""
-    if [ -n "$greptile_color" ]; then
-      greptile_cell="${greptile_color}${greptileConfidence}${RESET}${greptile_pad}"
-    else
-      greptile_cell="${greptileConfidence}${greptile_pad}"
-    fi
-
     # Use %s (not %b) for cells that already contain literal ESC bytes: %b
     # would re-interpret backslash sequences in the string, which breaks on
     # titles starting with letters printf reserves as escape prefixes (\U, \u,
     # \x, \e, \a, \b, \c, \f, \n, \r, \t, \v).
     if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
+      greptile_confidence_color_to_var greptile_color "$greptileConfidence"
+      greptile_pad_len=$((GREPTILE_W - ${#greptileConfidence}))
+      printf -v greptile_pad '%*s' "$greptile_pad_len" ""
+      if [ -n "$greptile_color" ]; then
+        greptile_cell="${greptile_color}${greptileConfidence}${RESET}${greptile_pad}"
+      else
+        greptile_cell="${greptileConfidence}${greptile_pad}"
+      fi
+
       printf '│ %s │ %-*s │ %-*s │ %s │ %s │ %-*s │\n' \
         "$title_cell" \
         "$AUTHOR_W" "$author_disp" \

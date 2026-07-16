@@ -1033,12 +1033,12 @@ JQ_STACK_PROGRAM=' | (
     | sort_by(.latest) | reverse
     | .[] as $group
     | $group.rows[]
-    | . + {stack:
+    | . + {stack: (
         if $group.size == 1 then "—"
         elif $group.forked then "fork"
         else "\(._stackPosition)/\($group.size)"
         end
-      };
+      )};
   stack_layout
 )'
 

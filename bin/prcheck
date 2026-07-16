@@ -750,7 +750,7 @@ TYPE_W=14
 STATUS_W=24
 UPDATED_W=14
 GREPTILE_W=9
-STACK_W=11
+STACK_W=5
 TABLE_COLUMNS=5
 TABLE_FIXED_W=$((AUTHOR_W + TYPE_W + STATUS_W + UPDATED_W))
 if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
@@ -1034,7 +1034,7 @@ JQ_STACK_PROGRAM=' | (
     | .[] as $group
     | $group.rows[]
     | . + {stack: (
-        if $group.size == 1 then "—"
+        if $group.size == 1 then "-"
         elif $group.forked then "fork"
         else "\(._stackPosition)/\($group.size)"
         end
@@ -1085,7 +1085,7 @@ TABLE_JQ_PROGRAM="$JQ_PROGRAM"' | .[]'
 if [ "$SHOW_STACKS" = true ]; then
   TABLE_JQ_PROGRAM="$JQ_PROGRAM$JQ_STACK_PROGRAM"
 else
-  TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"—\"}"
+  TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"-\"}"
 fi
 
 TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
@@ -1093,7 +1093,7 @@ TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg authorsCsv "$AUTHORS" \
   --arg noApprovals "$NO_APPROVALS" \
   --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-  "$TABLE_JQ_PROGRAM"' | [.title, .url, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "—" else "\(.greptileConfidence)/5" end)] | @tsv')
+  "$TABLE_JQ_PROGRAM"' | [.title, .url, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "-" else "\(.greptileConfidence)/5" end)] | @tsv')
 
 # Truncate a string to a visible width, appending "..." if cut. Writes the
 # result into the named variable (printf -v) to avoid a subshell per call.

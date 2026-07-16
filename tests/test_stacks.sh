@@ -65,7 +65,8 @@ json=$(run_prcheck --show-stacks --json)
 [[ "$stacks" == *"Linear 1"*"1/3"*"Linear 2"*"2/3"*"Linear 3"*"3/3"* ]]
 [[ "$stacks" != *"Hidden"* ]]
 [[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
-[[ "$stacks" == *"Solo"*"│ —"* ]]
+[[ "$stacks" == *"Solo"*"│ -"* ]]
+[[ "$stacks" != *"—"* ]]
 [[ "$stacks_with_greptile" == *"Stack"*"Greptile"* ]]
 [[ "$json" != *"_stack"* ]]
 

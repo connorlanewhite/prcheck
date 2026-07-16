@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+cat > "$tmpdir/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = auth ]; then
+  echo 'Token scopes: repo'
+elif [ "$1" = api ] && [ "$2" = graphql ]; then
+  jq -n '
+    def pr($number; $title; $updated; $base; $head): {
+      number: $number,
+      title: $title,
+      url: "https://example.test/\($number)",
+      updatedAt: $updated,
+      baseRefName: $base,
+      headRefName: $head,
+      repository: {defaultBranchRef: {name: "main"}},
+      author: {login: "writer", name: "Writer"},
+      commits: {nodes: []},
+      reviews: {nodes: []},
+      reviewRequests: {nodes: []},
+      files: {nodes: [], pageInfo: {hasNextPage: false}}
+    };
+    {data: {
+      primary: {nodes: [
+        pr(3; "Linear 3"; "2026-01-10T00:00:00Z"; "linear-2"; "linear-3"),
+        pr(6; "Fork B";   "2026-01-09T00:00:00Z"; "fork-root"; "fork-b"),
+        pr(10; "Solo";    "2026-01-08T00:00:00Z"; "main"; "solo"),
+        pr(2; "Linear 2"; "2026-01-02T00:00:00Z"; "linear-hidden"; "linear-2"),
+        (pr(8; "Hidden"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
+          | .reviews.nodes = [{author: {login: "reviewer", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
+          | .files.nodes = [{viewerViewedState: "VIEWED"}]),
+        pr(5; "Fork A";   "2026-01-02T00:00:00Z"; "fork-root"; "fork-a"),
+        pr(1; "Linear 1"; "2026-01-01T00:00:00Z"; "main"; "linear-1"),
+        pr(4; "Fork root";"2026-01-01T00:00:00Z"; "main"; "fork-root")
+      ]},
+      reviewRequested: {nodes: []}, reviewedBy: {nodes: []},
+      greptilePrimary: {nodes: []}, greptileReviewRequested: {nodes: []},
+      greptileReviewedBy: {nodes: []}
+    }}
+  '
+else
+  exit 1
+fi
+EOF
+chmod +x "$tmpdir/gh"
+
+run_prcheck() {
+  PATH="$tmpdir:$PATH" PRCHECK_TTL=0 PRCHECK_AUTH_TTL=0 \
+    "$repo_root/bin/prcheck" -r test/repo -u reviewer -L \
+    --include-all-base-branches --no-title-as-hyperlink "$@"
+}
+
+plain=$(run_prcheck)
+stacks=$(run_prcheck --show-stacks)
+stacks_with_greptile=$(run_prcheck --show-stacks --greptile-confidence)
+json=$(run_prcheck --show-stacks --json)
+
+[[ "$plain" != *"Stack"* ]]
+[[ "$stacks" == *"Stack"* ]]
+[[ "$stacks" == *"Linear 1"*"1/3"*"Linear 2"*"2/3"*"Linear 3"*"3/3"* ]]
+[[ "$stacks" != *"Hidden"* ]]
+[[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
+[[ "$stacks" == *"Solo"*"│ —"* ]]
+[[ "$stacks_with_greptile" == *"Stack"*"Greptile"* ]]
+[[ "$json" != *"_stack"* ]]
+
+echo "stack tests passed"

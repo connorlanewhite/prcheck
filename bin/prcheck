@@ -838,6 +838,11 @@ JQ_PROGRAM='
       | if $parents == null then null else $parents + [$head] end
     end;
 
+  def stack_marker:
+    try (capture("\\(?(?<number>[0-9]{1,2})[\\\\/](?<total>[0-9]{1,2})\\)?$")
+      | {number: (.number | tonumber), total: (.total | tonumber)})
+    catch null;
+
   def latest_review_by($login):
     .reviews.nodes
     | map(select(.author.login == $login))
@@ -920,6 +925,17 @@ JQ_PROGRAM='
         parent: (if $heads[$pr.baseRefName] then $pr.baseRefName else null end),
         childCount: ($childCounts[$pr.headRefName] // 0)
       })) as $branches
+  | ([ $candidates[] as $pr
+      | ($pr.title | stack_marker) as $marker
+      | select($marker != null)
+      | branch_lineage($branches; $pr.headRefName; []) as $lineage
+      | {
+          root: ($lineage[0] // $pr.headRefName),
+          position: ($lineage | length),
+          number: $marker.number,
+          total: $marker.total
+        }
+    ]) as $anchors
   | (
       if $authorsCsv == "" then []
       else ($authorsCsv
@@ -931,6 +947,12 @@ JQ_PROGRAM='
   | map(
       . as $pr
       | branch_lineage($branches; $pr.headRefName; []) as $stackLineage
+      | ($stackLineage[0] // $pr.headRefName) as $stackRoot
+      | ($stackLineage | length) as $stackPosition
+      | ([$anchors[]
+          | select(.root == $stackRoot)
+          | . + {distance: ((.position - $stackPosition) | abs)}]
+        | sort_by(.distance, .position) | .[0] // null) as $stackAnchor
       | ($pr | latest_review_by($ghUser)) as $myLastReview
       | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
       | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
@@ -1001,10 +1023,13 @@ JQ_PROGRAM='
           url: .url,
           author: $author,
           _stack: {
-            root: ($stackLineage[0] // $pr.headRefName),
-            position: ($stackLineage | length),
+            root: $stackRoot,
+            position: $stackPosition,
             childCount: ($branches[$pr.headRefName].childCount // 0),
-            updatedAt: $pr.updatedAt
+            updatedAt: $pr.updatedAt,
+            anchoredNumber: (if $stackAnchor == null then null
+              else $stackAnchor.number + $stackPosition - $stackAnchor.position end),
+            anchoredTotal: ($stackAnchor.total // null)
           },
           type: $prType,
           status: $reviewStatus,
@@ -1036,6 +1061,7 @@ JQ_STACK_PROGRAM=' | (
     | . + {stack: (
         if $group.size == 1 then "-"
         elif $group.forked then "fork"
+        elif ._stack.anchoredNumber != null then "\(._stack.anchoredNumber)/\(._stack.anchoredTotal)"
         else "\(._stackPosition)/\($group.size)"
         end
       )};

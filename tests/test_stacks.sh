@@ -31,7 +31,7 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
         pr(6; "Fork B";   "2026-01-09T00:00:00Z"; "fork-root"; "fork-b"),
         pr(10; "Solo";    "2026-01-08T00:00:00Z"; "main"; "solo"),
         pr(2; "Linear 2"; "2026-01-02T00:00:00Z"; "linear-hidden"; "linear-2"),
-        (pr(8; "Hidden"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
+        (pr(8; "Hidden (1/8)"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
           | .reviews.nodes = [{author: {login: "reviewer", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
           | .files.nodes = [{viewerViewedState: "VIEWED"}]),
         pr(5; "Fork A";   "2026-01-02T00:00:00Z"; "fork-root"; "fork-a"),
@@ -62,7 +62,7 @@ json=$(run_prcheck --show-stacks --json)
 
 [[ "$plain" != *"Stack"* ]]
 [[ "$stacks" == *"Stack"* ]]
-[[ "$stacks" == *"Linear 1"*"1/3"*"Linear 2"*"2/3"*"Linear 3"*"3/3"* ]]
+[[ "$stacks" == *"Linear 1"*"0/8"*"Linear 2"*"2/8"*"Linear 3"*"3/8"* ]]
 [[ "$stacks" != *"Hidden"* ]]
 [[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
 [[ "$stacks" == *"Solo"*"│ -"* ]]

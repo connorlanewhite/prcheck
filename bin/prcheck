@@ -636,6 +636,16 @@ SEARCH_Q_REVIEW_REQUESTED="${SEARCH_Q_BASE} ${REVIEW_REQUESTED_QUALIFIER} sort:u
 # them once you've re-reviewed with no newer commits/files.
 SEARCH_Q_REVIEWED_BY="${SEARCH_Q_BASE} -is:draft reviewed-by:${GH_USER} sort:updated-desc"
 
+# Merged ancestors still define a stack's branch lineage. Fetch recent ones
+# separately so they can appear as dimmed context without becoming results.
+SEARCH_Q_STACK_MEMBERS="repo:${REPO} is:pr is:merged"
+if [ "$NO_LABEL" = false ]; then
+  SEARCH_Q_STACK_MEMBERS="${SEARCH_Q_STACK_MEMBERS} label:\"${LABEL}\""
+elif [ -n "$AUTHORS" ] && [[ "$AUTHORS" != *,* ]]; then
+  SEARCH_Q_STACK_MEMBERS="${SEARCH_Q_STACK_MEMBERS} author:${AUTHORS}"
+fi
+SEARCH_Q_STACK_MEMBERS="${SEARCH_Q_STACK_MEMBERS} sort:updated-desc"
+
 # GitHub App comments require the app/ qualifier in issue search. Mirror each
 # candidate search so the Greptile-only result sets cannot add unrelated PRs
 # or lose older candidates behind a single broad search result limit.
@@ -650,11 +660,13 @@ query(
   $primaryQuery: String!
   $reviewRequestedQuery: String!
   $reviewedByQuery: String!
+  $stackMembersQuery: String!
   $greptilePrimaryQuery: String!
   $greptileReviewRequestedQuery: String!
   $greptileReviewedByQuery: String!
   $limit: Int!
   $includeGreptileConfidence: Boolean!
+  $includeStackMembers: Boolean!
 ) {
   primary: search(query: $primaryQuery, type: ISSUE, first: $limit) {
     nodes { ...prFields }
@@ -663,6 +675,13 @@ query(
     nodes { ...prFields }
   }
   reviewedBy: search(query: $reviewedByQuery, type: ISSUE, first: $limit) {
+    nodes { ...prFields }
+  }
+  stackMembers: search(
+    query: $stackMembersQuery
+    type: ISSUE
+    first: 100
+  ) @include(if: $includeStackMembers) {
     nodes { ...prFields }
   }
   greptilePrimary: search(
@@ -690,6 +709,7 @@ query(
 
 fragment prFields on PullRequest {
   number
+  state
   title
   url
   updatedAt
@@ -784,8 +804,8 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v17
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}"
+CACHE_VERSION=v18
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}|${STACK_MODE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
@@ -814,11 +834,13 @@ else
     -F primaryQuery="$SEARCH_Q" \
     -F reviewRequestedQuery="$SEARCH_Q_REVIEW_REQUESTED" \
     -F reviewedByQuery="$SEARCH_Q_REVIEWED_BY" \
+    -F stackMembersQuery="$SEARCH_Q_STACK_MEMBERS" \
     -F greptilePrimaryQuery="$SEARCH_Q_GREPTILE_PRIMARY" \
     -F greptileReviewRequestedQuery="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
     -F greptileReviewedByQuery="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
     -F limit="$LIMIT" \
     -F includeGreptileConfidence="$SHOW_GREPTILE_CONFIDENCE" \
+    -F includeStackMembers="$STACK_MODE" \
     -f query="$GRAPHQL_QUERY")
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
 fi
@@ -839,8 +861,12 @@ JQ_PROGRAM='
     end;
 
   def stack_marker:
-    try (capture("\\(?(?<number>[0-9]{1,2})[\\\\/](?<total>[0-9]{1,2})\\)?$")
-      | {number: (.number | tonumber), total: (.total | tonumber)})
+    try (capture("^(?<prefix>.*?)\\(?(?<number>[0-9]{1,2})[\\\\/](?<total>[0-9]{1,2})\\)?([^0-9]|$)")
+      | {
+          prefix: (.prefix | gsub("\\s+$"; "") | ascii_downcase),
+          number: (.number | tonumber),
+          total: (.total | tonumber)
+        })
     catch null;
 
   def latest_review_by($login):
@@ -894,7 +920,7 @@ JQ_PROGRAM='
   # Any query may be absent from the response on errors; default to [].
   (
     (
-      ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []))
+      ((.data.primary.nodes // []) + (.data.reviewRequested.nodes // []) + (.data.reviewedBy.nodes // []) + (.data.stackMembers.nodes // []))
       | unique_prs
     ) as $candidates
     | (
@@ -932,10 +958,22 @@ JQ_PROGRAM='
       | {
           root: ($lineage[0] // $pr.headRefName),
           position: ($lineage | length),
+          author: ($pr.author.login // "unknown"),
+          prefix: $marker.prefix,
           number: $marker.number,
           total: $marker.total
         }
     ]) as $anchors
+  | ([$anchors
+      | group_by([.author, .prefix, .total])[]
+      | select(length > 1)
+      | {
+          author: .[0].author,
+          prefix: .[0].prefix,
+          total: .[0].total,
+          root: "marker:\(.[0].author):\(.[0].prefix):\(.[0].total)"
+        }
+    ]) as $explicitStacks
   | (
       if $authorsCsv == "" then []
       else ($authorsCsv
@@ -953,6 +991,14 @@ JQ_PROGRAM='
           | select(.root == $stackRoot)
           | . + {distance: ((.position - $stackPosition) | abs)}]
         | sort_by(.distance, .position) | .[0] // null) as $stackAnchor
+      | ([$explicitStacks[]
+          | select(
+              $stackAnchor != null
+              and .author == $stackAnchor.author
+              and .prefix == $stackAnchor.prefix
+              and .total == $stackAnchor.total
+            )]
+        | .[0] // null) as $explicitStack
       | ($pr | latest_review_by($ghUser)) as $myLastReview
       | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
       | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
@@ -1022,8 +1068,8 @@ JQ_PROGRAM='
           url: .url,
           author: $author,
           _stack: {
-            root: $stackRoot,
-            position: $stackPosition,
+            root: ($explicitStack.root // $stackRoot),
+            position: (if $explicitStack == null then $stackPosition else $stackAnchor.number end),
             childCount: ($branches[$pr.headRefName].childCount // 0),
             updatedAt: $pr.updatedAt,
             anchoredNumber: (if $stackAnchor == null then null
@@ -1037,7 +1083,7 @@ JQ_PROGRAM='
           greptileConfidence: $greptileConfidence,
           selfRequested: $selfRequested,
           _approvedByYou: $approvedByYou,
-          _visible: ($needsAttention and $passesApprovals and $passesSelfAuthor and $passesAuthors and $passesBase)
+          _visible: (($pr.state // "OPEN") == "OPEN" and $needsAttention and $passesApprovals and $passesSelfAuthor and $passesAuthors and $passesBase)
         }
     )
 '

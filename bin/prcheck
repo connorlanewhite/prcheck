@@ -682,7 +682,7 @@ query(
     type: ISSUE
     first: 100
   ) @include(if: $includeStackMembers) {
-    nodes { ...prFields }
+    nodes { ...stackPrFields }
   }
   greptilePrimary: search(
     query: $greptilePrimaryQuery
@@ -736,6 +736,27 @@ fragment prFields on PullRequest {
   files(first: 100) {
     nodes { viewerViewedState }
     pageInfo { hasNextPage }
+  }
+}
+
+fragment stackPrFields on PullRequest {
+  number
+  state
+  title
+  url
+  updatedAt
+  baseRefName
+  headRefName
+  repository {
+    defaultBranchRef { name }
+  }
+  author { login ... on User { name } }
+  reviews(last: 50) {
+    nodes {
+      author { login __typename }
+      state
+      submittedAt
+    }
   }
 }
 
@@ -804,7 +825,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v18
+CACHE_VERSION=v19
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}|${STACK_MODE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -830,18 +851,25 @@ fi
 if [ "$USE_CACHE" = true ]; then
   GRAPHQL_RESPONSE=$(cat "$CACHE_FILE")
 else
-  GRAPHQL_RESPONSE=$(gh api graphql \
-    -F primaryQuery="$SEARCH_Q" \
-    -F reviewRequestedQuery="$SEARCH_Q_REVIEW_REQUESTED" \
-    -F reviewedByQuery="$SEARCH_Q_REVIEWED_BY" \
-    -F stackMembersQuery="$SEARCH_Q_STACK_MEMBERS" \
-    -F greptilePrimaryQuery="$SEARCH_Q_GREPTILE_PRIMARY" \
-    -F greptileReviewRequestedQuery="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
-    -F greptileReviewedByQuery="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
-    -F limit="$LIMIT" \
-    -F includeGreptileConfidence="$SHOW_GREPTILE_CONFIDENCE" \
-    -F includeStackMembers="$STACK_MODE" \
-    -f query="$GRAPHQL_QUERY")
+  for attempt in 1 2; do
+    if GRAPHQL_RESPONSE=$(gh api graphql \
+      -F primaryQuery="$SEARCH_Q" \
+      -F reviewRequestedQuery="$SEARCH_Q_REVIEW_REQUESTED" \
+      -F reviewedByQuery="$SEARCH_Q_REVIEWED_BY" \
+      -F stackMembersQuery="$SEARCH_Q_STACK_MEMBERS" \
+      -F greptilePrimaryQuery="$SEARCH_Q_GREPTILE_PRIMARY" \
+      -F greptileReviewRequestedQuery="$SEARCH_Q_GREPTILE_REVIEW_REQUESTED" \
+      -F greptileReviewedByQuery="$SEARCH_Q_GREPTILE_REVIEWED_BY" \
+      -F limit="$LIMIT" \
+      -F includeGreptileConfidence="$SHOW_GREPTILE_CONFIDENCE" \
+      -F includeStackMembers="$STACK_MODE" \
+      -f query="$GRAPHQL_QUERY"); then
+      break
+    fi
+    [ "$attempt" -eq 2 ] && exit 1
+    echo "[prcheck] GitHub API request failed; retrying..." >&2
+    sleep 1
+  done
   echo "$GRAPHQL_RESPONSE" > "$CACHE_FILE"
 fi
 
@@ -1000,9 +1028,9 @@ JQ_PROGRAM='
             )]
         | .[0] // null) as $explicitStack
       | ($pr | latest_review_by($ghUser)) as $myLastReview
-      | ($pr.commits.nodes | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
-      | ($pr.files.nodes | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
-      | ($pr.files.nodes | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewed
+      | (($pr.commits.nodes // []) | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
+      | (($pr.files.nodes // []) | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
+      | (($pr.files.nodes // []) | map(.viewerViewedState) | any(. == "VIEWED")) as $hasAnyViewed
       | ($pr.files.pageInfo.hasNextPage // false) as $filesHasMore
       | ($myLastReview == null) as $neverReviewed
       | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
@@ -1060,7 +1088,7 @@ JQ_PROGRAM='
       | ((($pr.author.login // "unknown") != $ghUser)) as $passesSelfAuthor
       | ((($authors | length) == 0) or (($authors | index(($pr.author.login // ""))) != null)) as $passesAuthors
       | (($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name)) as $passesBase
-      | ($pr.reviewRequests.nodes | any(.requestedReviewer.login == $ghUser)) as $selfRequested
+      | (($pr.reviewRequests.nodes // []) | any(.requestedReviewer.login == $ghUser)) as $selfRequested
       | (.title | gsub("[\\n\\r\\t]"; " ") | gsub(" +"; " ")) as $clean_title
       | {
           number: $pr.number,

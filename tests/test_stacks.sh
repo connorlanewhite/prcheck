@@ -10,6 +10,10 @@ cat > "$tmpdir/gh" <<'EOF'
 if [ "$1" = auth ]; then
   echo 'Token scopes: repo'
 elif [ "$1" = api ] && [ "$2" = graphql ]; then
+  if [ -n "${PRCHECK_FAIL_ONCE_FILE:-}" ] && [ ! -e "$PRCHECK_FAIL_ONCE_FILE" ]; then
+    touch "$PRCHECK_FAIL_ONCE_FILE"
+    exit 1
+  fi
   jq -n '
     def pr($number; $title; $updated; $base; $head): {
       number: $number,
@@ -64,6 +68,7 @@ plain=$(run_prcheck)
 stacks=$(run_prcheck --stack-mode)
 stacks_with_greptile=$(run_prcheck --stack-mode --greptile-confidence)
 json=$(run_prcheck --stack-mode --json)
+retry=$(PRCHECK_FAIL_ONCE_FILE="$tmpdir/fail-once" run_prcheck --stack-mode 2>/dev/null)
 
 [[ "$plain" != *"Stack"* ]]
 [[ "$plain" != *"Example stack 1/2"* ]]
@@ -80,5 +85,6 @@ json=$(run_prcheck --stack-mode --json)
 [[ "$json" != *"_stack"* ]]
 [[ "$json" != *"Hidden"* ]]
 [[ "$json" != *"Example stack 1/2"* ]]
+[[ "$retry" == *"Example stack 2/2: follow-up"* ]]
 
 echo "stack tests passed"

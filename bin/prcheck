@@ -787,13 +787,13 @@ fi
 # Column widths for table output. Title is sized from the terminal, with a
 # default floor so PR titles are still useful in narrower panes.
 AUTHOR_W=18
-TYPE_W=14
-STATUS_W=24
+STATUS_W=14
+REVIEW_STATUS_W=24
 UPDATED_W=14
 GREPTILE_W=9
 STACK_W=6
 TABLE_COLUMNS=5
-TABLE_FIXED_W=$((AUTHOR_W + TYPE_W + STATUS_W + UPDATED_W))
+TABLE_FIXED_W=$((AUTHOR_W + STATUS_W + REVIEW_STATUS_W + UPDATED_W))
 if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
   TABLE_COLUMNS=6
   TABLE_FIXED_W=$((TABLE_FIXED_W + GREPTILE_W))
@@ -1041,7 +1041,8 @@ JQ_PROGRAM='
           # started (some files marked viewed, some not). If no review has
           # been submitted and no files are marked viewed, this PR has not
           # been touched at all -- show "Never Reviewed" instead.
-          if $newSinceReview then "New Commits"
+          if $pr.state == "MERGED" then "Merged"
+          elif $newSinceReview then "New Commits"
           elif $neverReviewed and ($hasAnyViewed | not) then "Never Reviewed"
           elif $unviewedFlag then "Unviewed Files"
           elif $neverReviewed then "Never Reviewed"
@@ -1317,8 +1318,8 @@ greptile_confidence_color_to_var() {
 
 repeat_to_var H_TITLE   "─" $((TITLE_W + 2))
 repeat_to_var H_AUTHOR  "─" $((AUTHOR_W + 2))
-repeat_to_var H_TYPE    "─" $((TYPE_W + 2))
-repeat_to_var H_STATUS  "─" $((STATUS_W + 2))
+repeat_to_var H_STATUS        "─" $((STATUS_W + 2))
+repeat_to_var H_REVIEW_STATUS "─" $((REVIEW_STATUS_W + 2))
 repeat_to_var H_UPDATED "─" $((UPDATED_W + 2))
 repeat_to_var H_GREPTILE "─" $((GREPTILE_W + 2))
 repeat_to_var H_STACK "─" $((STACK_W + 2))
@@ -1327,7 +1328,7 @@ print_border() {
   local left="$1" mid="$2" right="$3"
   local line="${left}${H_TITLE}"
   [ "$STACK_MODE" = true ] && line="${line}${mid}${H_STACK}"
-  line="${line}${mid}${H_AUTHOR}${mid}${H_TYPE}${mid}${H_STATUS}"
+  line="${line}${mid}${H_AUTHOR}${mid}${H_STATUS}${mid}${H_REVIEW_STATUS}"
   [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && line="${line}${mid}${H_GREPTILE}"
   printf '%s%s%s%s\n' "$line" "$mid" "$H_UPDATED" "$right"
 }
@@ -1335,21 +1336,21 @@ print_border() {
 print_border "┌" "┬" "┐"
 printf '│ %-*s ' "$TITLE_W" "Title"
 [ "$STACK_MODE" = true ] && printf '│ %-*s ' "$STACK_W" "Stack"
-printf '│ %-*s │ %-*s │ %-*s ' "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status"
+printf '│ %-*s │ %-*s │ %-*s ' "$AUTHOR_W" "Author" "$STATUS_W" "Status" "$REVIEW_STATUS_W" "Review status"
 [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && printf '│ %-*s ' "$GREPTILE_W" "Greptile"
 printf '│ %-*s │\n' "$UPDATED_W" "Updated"
 print_border "├" "┼" "┤"
 
 if [ -n "$ROW_DATA" ]; then
-  while IFS=$'\x1f' read -r title url tree stack author prType status updated tone greptileConfidence dimmed parent; do
+  while IFS=$'\x1f' read -r title url tree stack author prStatus reviewStatus updated tone greptileConfidence dimmed parent; do
     [ -z "$title" ] && continue
     tree_width=0
     [ -n "$tree" ] && tree_width=3
     truncate_to_var title_disp "$title" $((TITLE_W - tree_width))
     truncate_to_var author_disp "$author" "$AUTHOR_W"
     truncate_to_var stack_disp "$stack" "$STACK_W"
-    truncate_to_var type_disp "$prType" "$TYPE_W"
-    truncate_to_var status_disp "$status" "$STATUS_W"
+    truncate_to_var status_disp "$prStatus" "$STATUS_W"
+    truncate_to_var review_status_disp "$reviewStatus" "$REVIEW_STATUS_W"
     truncate_to_var updated_disp "$updated" "$UPDATED_W"
 
     # Build the title cell so its VISIBLE width is exactly TITLE_W, then wrap
@@ -1363,16 +1364,15 @@ if [ -n "$ROW_DATA" ]; then
       title_cell="${tree}${title_disp}${title_pad}"
     fi
 
-    # Colorize the status cell based on the tone emitted by jq. ANSI color
-    # codes are zero-width in rendering, so pad to STATUS_W first, then wrap
-    # with color.
+    # Colorize the review-status cell based on the tone emitted by jq. ANSI
+    # codes are zero-width in rendering, so pad before wrapping with color.
     tone_color_to_var status_color "$tone"
-    status_pad_len=$((STATUS_W - ${#status_disp}))
-    printf -v status_pad '%*s' "$status_pad_len" ""
+    review_status_pad_len=$((REVIEW_STATUS_W - ${#review_status_disp}))
+    printf -v review_status_pad '%*s' "$review_status_pad_len" ""
     if [ -n "$status_color" ]; then
-      status_cell="${status_color}${status_disp}${RESET}${status_pad}"
+      review_status_cell="${status_color}${review_status_disp}${RESET}${review_status_pad}"
     else
-      status_cell="${status_disp}${status_pad}"
+      review_status_cell="${review_status_disp}${review_status_pad}"
     fi
 
     if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
@@ -1402,8 +1402,8 @@ if [ -n "$ROW_DATA" ]; then
     [ "$STACK_MODE" = true ] && printf '│ %s%-*s%s ' "$text_prefix" "$STACK_W" "$stack_disp" "$text_suffix"
     printf '│ %s%-*s%s │ %s%-*s%s │ %s%s%s ' \
       "$text_prefix" "$AUTHOR_W" "$author_disp" "$text_suffix" \
-      "$text_prefix" "$TYPE_W" "$type_disp" "$text_suffix" \
-      "$text_prefix" "$status_cell" "$text_suffix"
+      "$text_prefix" "$STATUS_W" "$status_disp" "$text_suffix" \
+      "$text_prefix" "$review_status_cell" "$text_suffix"
     [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && printf '│ %s%s%s ' "$text_prefix" "$greptile_cell" "$text_suffix"
     printf '│ %s%-*s%s │\n' "$text_prefix" "$UPDATED_W" "$updated_disp" "$text_suffix"
   done <<< "$ROW_DATA"

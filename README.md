@@ -20,6 +20,8 @@ By default, only PRs targeting the repository's default branch (e.g., `main` or 
 
 Use `--show-stacks` with `--include-all-base-branches` to group stacked PRs in base-to-tip order and add a `Stack` column such as `1/8`. A trailing marker such as `(2/8)` in a PR title anchors the sequence for surrounding PRs; the nearest marker wins if authors use conflicting sequences. Forked stacks are grouped and marked `fork` instead of being given a misleading linear sequence.
 
+Each relevant stack expands under a summary row with its PR count, your approval count, and its latest update. PRs that would normally be filtered out remain visible as dimmed children.
+
 Run it from any GitHub repo; it'll auto-detect the repo and your username. Or point it at any repo you want with flags.
 
 ## Status column colors

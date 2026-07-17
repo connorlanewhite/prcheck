@@ -62,12 +62,15 @@ json=$(run_prcheck --show-stacks --json)
 
 [[ "$plain" != *"Stack"* ]]
 [[ "$stacks" == *"Stack"* ]]
+[[ "$stacks" == *"Stack: Linear 1"*"4 PRs"*"1/4 approved by you"* ]]
 [[ "$stacks" == *"Linear 1"*"0/8"*"Linear 2"*"2/8"*"Linear 3"*"3/8"* ]]
-[[ "$stacks" != *"Hidden"* ]]
+[[ "$stacks" == *$'\033[2m'"├─ Hidden (1/8)"* ]]
+[[ "$stacks" == *"└─ Linear 3"* ]]
 [[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
 [[ "$stacks" == *"Solo"*"│ -"* ]]
 [[ "$stacks" != *"—"* ]]
 [[ "$stacks_with_greptile" == *"Stack"*"Greptile"* ]]
 [[ "$json" != *"_stack"* ]]
+[[ "$json" != *"Hidden"* ]]
 
 echo "stack tests passed"

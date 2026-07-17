@@ -750,7 +750,7 @@ TYPE_W=14
 STATUS_W=24
 UPDATED_W=14
 GREPTILE_W=9
-STACK_W=5
+STACK_W=6
 TABLE_COLUMNS=5
 TABLE_FIXED_W=$((AUTHOR_W + TYPE_W + STATUS_W + UPDATED_W))
 if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
@@ -962,7 +962,6 @@ JQ_PROGRAM='
       | (if $neverReviewed then false else $hasCommitsNewerThanReview end) as $newSinceReview
       | ($hasUnviewedInFirst100 or $filesHasMore) as $unviewedFlag
       | ($neverReviewed or $newSinceReview or $unviewedFlag) as $needsAttention
-      | select($needsAttention)
       | (
           # "Unviewed Files" is reserved for PRs where review has actually
           # started (some files marked viewed, some not). If no review has
@@ -972,13 +971,13 @@ JQ_PROGRAM='
           elif $neverReviewed and ($hasAnyViewed | not) then "Never Reviewed"
           elif $unviewedFlag then "Unviewed Files"
           elif $neverReviewed then "Never Reviewed"
-          else "Unknown"
+          else "Reviewed"
           end
         ) as $prType
       | ($pr | latest_independent_reviews) as $latestPerReviewer
       | ($pr | latest_greptile_confidence) as $greptileConfidence
       | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
-      | select(($noApprovals == "false") or (($approvers | length) == 0))
+      | (($noApprovals == "false") or (($approvers | length) == 0)) as $passesApprovals
       | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters
       | ($latestPerReviewer | map(select(.state == "COMMENTED" or .state == "DISMISSED"))) as $commenters
       | ($approvers        | map(select(.author.login != $ghUser)) | length) as $approversOthers
@@ -1012,9 +1011,9 @@ JQ_PROGRAM='
         ) as $tone
       | ((.updatedAt | fromdate) | strflocaltime("%-m/%-d %-I:%M %p")) as $updatedLocal
       | (if ($pr.author.name // "" | length) > 0 then $pr.author.name else ($pr.author.login // "unknown") end) as $author
-      | select((($pr.author.login // "unknown") != $ghUser))
-      | select( (($authors | length) == 0) or ( ($authors | index(($pr.author.login // ""))) != null ) )
-      | select( ($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name) )
+      | ((($pr.author.login // "unknown") != $ghUser)) as $passesSelfAuthor
+      | ((($authors | length) == 0) or (($authors | index(($pr.author.login // ""))) != null)) as $passesAuthors
+      | (($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name)) as $passesBase
       | ($pr.reviewRequests.nodes | any(.requestedReviewer.login == $ghUser)) as $selfRequested
       | (.title | gsub("[\\n\\r\\t]"; " ") | gsub(" +"; " ")) as $clean_title
       | {
@@ -1036,35 +1035,70 @@ JQ_PROGRAM='
           tone: $tone,
           updated: $updatedLocal,
           greptileConfidence: $greptileConfidence,
-          selfRequested: $selfRequested
+          selfRequested: $selfRequested,
+          _approvedByYou: $approvedByYou,
+          _visible: ($needsAttention and $passesApprovals and $passesSelfAuthor and $passesAuthors and $passesBase)
         }
     )
 '
 
-# Use all fetched candidates to bridge filtered-out PRs, then number only the
-# rows that remain visible. No additional GitHub requests are needed.
+# Expand a stack when any member needs attention. Filtered members remain in
+# the tree as dimmed children; unrelated stacks stay hidden.
 JQ_STACK_PROGRAM=' | (
   def stack_layout:
     group_by(._stack.root) | map(
       . as $group
+      | ($group | sort_by(._stack.position, .number) | to_entries
+        | map(.value + {_stackPosition: (.key + 1)})) as $rows
+      | ($rows | max_by(._stack.updatedAt)) as $latestRow
       | {
-          latest: (map(._stack.updatedAt) | max),
-          rows: ($group | sort_by(._stack.position, .number) | to_entries
-            | map(.value + {_stackPosition: (.key + 1)})),
+          latest: $latestRow._stack.updatedAt,
+          latestDisplay: $latestRow.updated,
+          rows: $rows,
           size: ($group | length),
-          forked: ($group | any(._stack.childCount > 1))
+          forked: ($group | any(._stack.childCount > 1)),
+          approvedByYou: ($group | map(select(._approvedByYou)) | length),
+          visible: ($group | any(._visible))
         }
     )
+    | map(select(.visible))
     | sort_by(.latest) | reverse
     | .[] as $group
-    | $group.rows[]
-    | . + {stack: (
-        if $group.size == 1 then "-"
-        elif $group.forked then "fork"
-        elif ._stack.anchoredNumber != null then "\(._stack.anchoredNumber)/\(._stack.anchoredTotal)"
-        else "\(._stackPosition)/\($group.size)"
-        end
-      )};
+    | if $group.size == 1 then
+        $group.rows[] | select(._visible)
+        | . + {
+            stack: "-",
+            tree: "",
+            _dimmed: false,
+            _parent: false
+          }
+      else
+        ({
+          title: "Stack: \($group.rows[0].title)",
+          url: "",
+          tree: "",
+          stack: "\($group.size) PRs",
+          author: $group.rows[0].author,
+          type: "Stack",
+          status: "\($group.approvedByYou)/\($group.size) approved by you",
+          updated: $group.latestDisplay,
+          tone: "unreviewed",
+          greptileConfidence: null,
+          _dimmed: false,
+          _parent: true
+        }),
+        ($group.rows | to_entries[]
+          | .key as $index | .value
+          | . + {
+              tree: (if $index == ($group.size - 1) then "└─ " else "├─ " end),
+              stack: (if $group.forked then "fork"
+                elif ._stack.anchoredNumber != null then "\(._stack.anchoredNumber)/\(._stack.anchoredTotal)"
+                else "\(._stackPosition)/\($group.size)" end),
+              updated: "",
+              _dimmed: (._visible | not),
+              _parent: false
+            })
+      end;
   stack_layout
 )'
 
@@ -1076,7 +1110,7 @@ if [ "$REQUEST_REVIEW" = true ]; then
     --arg authorsCsv "$AUTHORS" \
     --arg noApprovals "$NO_APPROVALS" \
     --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-    "$JQ_PROGRAM"' | .[] | select(.selfRequested | not) | "\(.number)\t\(.url)"')
+    "$JQ_PROGRAM"' | .[] | select(._visible and (.selfRequested | not)) | "\(.number)\t\(.url)"')
 
   if [ -z "$REQUEST_TARGETS" ]; then
     echo "[prcheck] Nothing to do: you're already a requested reviewer on every listed PR (or none matched)."
@@ -1101,25 +1135,25 @@ if [ "$JSON_OUTPUT" = true ]; then
     --arg authorsCsv "$AUTHORS" \
     --arg noApprovals "$NO_APPROVALS" \
     --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-    "$JQ_PROGRAM"' | map(del(._stack))'
+    "$JQ_PROGRAM"' | map(select(._visible) | del(._stack, ._approvedByYou, ._visible))'
   exit 0
 fi
 
 # Table output: emit normalized TSV rows, then render fixed-width cells in Bash
 # so ANSI hyperlink and color escape bytes do not distort column widths.
-TABLE_JQ_PROGRAM="$JQ_PROGRAM"' | .[]'
+TABLE_JQ_PROGRAM="$JQ_PROGRAM"' | .[] | select(._visible)'
 if [ "$SHOW_STACKS" = true ]; then
   TABLE_JQ_PROGRAM="$JQ_PROGRAM$JQ_STACK_PROGRAM"
 else
-  TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"-\"}"
+  TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"-\", tree: \"\", _dimmed: false, _parent: false}"
 fi
 
-TSV_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
+ROW_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg ghUser "$GH_USER" \
   --arg authorsCsv "$AUTHORS" \
   --arg noApprovals "$NO_APPROVALS" \
   --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-  "$TABLE_JQ_PROGRAM"' | [.title, .url, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "-" else "\(.greptileConfidence)/5" end)] | @tsv')
+  "$TABLE_JQ_PROGRAM"' | [.title, .url, .tree, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "-" else "\(.greptileConfidence)/5" end), ._dimmed, ._parent] | join("\u001f")')
 
 # Truncate a string to a visible width, appending "..." if cut. Writes the
 # result into the named variable (printf -v) to avoid a subshell per call.
@@ -1143,6 +1177,8 @@ repeat_to_var() {
 
 ESC=$'\033'
 RESET="${ESC}[0m"
+DIM="${ESC}[2m"
+BOLD="${ESC}[1m"
 GREEN="${ESC}[32m"
 YELLOW="${ESC}[33m"
 RED="${ESC}[31m"
@@ -1230,10 +1266,12 @@ printf '│ %-*s │ %-*s │ %-*s ' "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STA
 printf '│ %-*s │\n' "$UPDATED_W" "Updated"
 print_border "├" "┼" "┤"
 
-if [ -n "$TSV_DATA" ]; then
-  while IFS=$'\t' read -r title url stack author prType status updated tone greptileConfidence; do
+if [ -n "$ROW_DATA" ]; then
+  while IFS=$'\x1f' read -r title url tree stack author prType status updated tone greptileConfidence dimmed parent; do
     [ -z "$title" ] && continue
-    truncate_to_var title_disp "$title" "$TITLE_W"
+    tree_width=0
+    [ -n "$tree" ] && tree_width=3
+    truncate_to_var title_disp "$title" $((TITLE_W - tree_width))
     truncate_to_var author_disp "$author" "$AUTHOR_W"
     truncate_to_var stack_disp "$stack" "$STACK_W"
     truncate_to_var type_disp "$prType" "$TYPE_W"
@@ -1243,12 +1281,12 @@ if [ -n "$TSV_DATA" ]; then
     # Build the title cell so its VISIBLE width is exactly TITLE_W, then wrap
     # the visible text with OSC 8 hyperlink escapes (which take zero visible
     # columns in terminals that support them).
-    title_pad_len=$((TITLE_W - ${#title_disp}))
+    title_pad_len=$((TITLE_W - tree_width - ${#title_disp}))
     printf -v title_pad '%*s' "$title_pad_len" ""
-    if [ "$TITLE_AS_HYPERLINK" = true ]; then
-      title_cell="${ESC}]8;;${url}${ESC}\\${title_disp}${ESC}]8;;${ESC}\\${title_pad}"
+    if [ "$TITLE_AS_HYPERLINK" = true ] && [ -n "$url" ]; then
+      title_cell="${ESC}]8;;${url}${ESC}\\${tree}${title_disp}${ESC}]8;;${ESC}\\${title_pad}"
     else
-      title_cell="${title_disp}${title_pad}"
+      title_cell="${tree}${title_disp}${title_pad}"
     fi
 
     # Colorize the status cell based on the tone emitted by jq. ANSI color
@@ -1274,14 +1312,27 @@ if [ -n "$TSV_DATA" ]; then
       fi
     fi
 
-    # Use %s for cells containing literal ESC bytes; %b would reinterpret
-    # backslash sequences in PR titles.
-    printf '│ %s ' "$title_cell"
-    [ "$SHOW_STACKS" = true ] && printf '│ %-*s ' "$STACK_W" "$stack_disp"
-    printf '│ %-*s │ %-*s │ %s ' "$AUTHOR_W" "$author_disp" "$TYPE_W" "$type_disp" "$status_cell"
-    [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && printf '│ %s ' "$greptile_cell"
-    printf '│ %-*s │\n' "$UPDATED_W" "$updated_disp"
-  done <<< "$TSV_DATA"
+    text_prefix=""
+    text_suffix=""
+    if [ "$dimmed" = true ]; then
+      text_prefix=$DIM
+      text_suffix=$RESET
+    elif [ "$parent" = true ]; then
+      text_prefix=$BOLD
+      text_suffix=$RESET
+    fi
+
+    # Keep styling outside printf field widths so ANSI bytes never move a
+    # separator. %s also avoids reinterpreting backslashes in PR titles.
+    printf '│ %s%s%s ' "$text_prefix" "$title_cell" "$text_suffix"
+    [ "$SHOW_STACKS" = true ] && printf '│ %s%-*s%s ' "$text_prefix" "$STACK_W" "$stack_disp" "$text_suffix"
+    printf '│ %s%-*s%s │ %s%-*s%s │ %s%s%s ' \
+      "$text_prefix" "$AUTHOR_W" "$author_disp" "$text_suffix" \
+      "$text_prefix" "$TYPE_W" "$type_disp" "$text_suffix" \
+      "$text_prefix" "$status_cell" "$text_suffix"
+    [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && printf '│ %s%s%s ' "$text_prefix" "$greptile_cell" "$text_suffix"
+    printf '│ %s%-*s%s │\n' "$text_prefix" "$UPDATED_W" "$updated_disp" "$text_suffix"
+  done <<< "$ROW_DATA"
 fi
 
 print_border "└" "┴" "┘"

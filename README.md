@@ -18,7 +18,7 @@ Queries GitHub's API to find open PRs and intelligently filters them based on yo
 
 By default, only PRs targeting the repository's default branch (e.g., `main` or `master`) are shown. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
 
-Use `--show-stacks` with `--include-all-base-branches` to group stacked PRs in base-to-tip order and add a `Stack` column such as `1/8`. A trailing marker such as `(2/8)` in a PR title anchors the sequence for surrounding PRs; the nearest marker wins if authors use conflicting sequences. Forked stacks are grouped and marked `fork` instead of being given a misleading linear sequence.
+Use `--stack-mode` to include non-default base branches, group stacked PRs in base-to-tip order, and add a `Stack` column such as `1/8`. A trailing marker such as `(2/8)` in a PR title anchors the sequence for surrounding PRs; the nearest marker wins if authors use conflicting sequences. Forked stacks are grouped and marked `fork` instead of being given a misleading linear sequence.
 
 Each relevant stack expands under a summary row with its PR count, your approval count, and its latest update. PRs that would normally be filtered out remain visible as dimmed children.
 
@@ -128,7 +128,7 @@ Common flags:
 - `--request-review` — request your review on each listed PR where it is not already requested
 - `--include-team-review-requests` — include team-based review requests in addition to direct requests
 - `--include-all-base-branches` — include PRs targeting any base branch (default: only default branch)
-- `--show-stacks` — group visible stacked PRs and show their sequence
+- `--stack-mode` — include non-default base branches, group stacked PRs, and show their sequence
 - `--greptile-confidence` — add Greptile's latest confidence score
 - `--no-title-as-hyperlink` — show URL as a separate column instead of embedding it in the title
 - `--json` — output JSON instead of a table

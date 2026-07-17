@@ -13,7 +13,7 @@ AUTHORS="${PRCHECK_AUTHORS:-}"  # comma-separated GitHub logins
 TITLE_AS_HYPERLINK=true
 JSON_OUTPUT=false
 REQUEST_REVIEW=false
-SHOW_STACKS=false
+STACK_MODE=false
 
 # Only show PRs with no meaningful approvals (bots/apps and PR-author reviews
 # are ignored the same way the Status column ignores them).
@@ -60,7 +60,7 @@ Options:
       --title-as-hyperlink        Title embeds URL (default)
       --no-title-as-hyperlink     Show URL as separate column
       --greptile-confidence       Show Greptile's latest confidence score
-      --show-stacks               Group stacked PRs and show their sequence
+      --stack-mode                Group stacked PRs, including non-default base branches
   -j, --json                      Output JSON instead of table
       --update                    Update prcheck to the latest version from GitHub
       --completion zsh            Print zsh completion script
@@ -79,7 +79,7 @@ Examples:
   $0 --created-within 14
   $0 --created-within 14 --request-review
   $0 --include-all-base-branches
-  $0 --include-all-base-branches --show-stacks
+  $0 --stack-mode
 
 Requires: gh (authenticated with repo scope), jq.
 EOF
@@ -164,7 +164,7 @@ _prcheck() {
     '--title-as-hyperlink[Embed URL in title]' \
     '--no-title-as-hyperlink[Show URL as a separate column]' \
     '--greptile-confidence[Show Greptile confidence score]' \
-    '--show-stacks[Group stacked PRs and show their sequence]' \
+    '--stack-mode[Group stacked PRs, including non-default base branches]' \
     '(-j --json)'{-j,--json}'[Output JSON instead of table]' \
     '--update[Update prcheck to the latest version from GitHub]' \
     '--completion[Print shell completion script]:shell:(zsh)' \
@@ -422,7 +422,7 @@ while [[ $# -gt 0 ]]; do
     --title-as-hyperlink) TITLE_AS_HYPERLINK=true; shift;;
     --no-title-as-hyperlink) TITLE_AS_HYPERLINK=false; shift;;
     --greptile-confidence) SHOW_GREPTILE_CONFIDENCE=true; shift;;
-    --show-stacks) SHOW_STACKS=true; shift;;
+    --stack-mode) STACK_MODE=true; EXCLUDE_NON_DEFAULT_BASE=false; shift;;
     -j|--json) JSON_OUTPUT=true; shift;;
     --update) self_update;;
     --completion)
@@ -757,7 +757,7 @@ if [ "$SHOW_GREPTILE_CONFIDENCE" = true ]; then
   TABLE_COLUMNS=6
   TABLE_FIXED_W=$((TABLE_FIXED_W + GREPTILE_W))
 fi
-if [ "$SHOW_STACKS" = true ]; then
+if [ "$STACK_MODE" = true ]; then
   TABLE_COLUMNS=$((TABLE_COLUMNS + 1))
   TABLE_FIXED_W=$((TABLE_FIXED_W + STACK_W))
 fi
@@ -1142,7 +1142,7 @@ fi
 # Table output: emit normalized TSV rows, then render fixed-width cells in Bash
 # so ANSI hyperlink and color escape bytes do not distort column widths.
 TABLE_JQ_PROGRAM="$JQ_PROGRAM"' | .[] | select(._visible)'
-if [ "$SHOW_STACKS" = true ]; then
+if [ "$STACK_MODE" = true ]; then
   TABLE_JQ_PROGRAM="$JQ_PROGRAM$JQ_STACK_PROGRAM"
 else
   TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"-\", tree: \"\", _dimmed: false, _parent: false}"
@@ -1252,7 +1252,7 @@ repeat_to_var H_STACK "─" $((STACK_W + 2))
 print_border() {
   local left="$1" mid="$2" right="$3"
   local line="${left}${H_TITLE}"
-  [ "$SHOW_STACKS" = true ] && line="${line}${mid}${H_STACK}"
+  [ "$STACK_MODE" = true ] && line="${line}${mid}${H_STACK}"
   line="${line}${mid}${H_AUTHOR}${mid}${H_TYPE}${mid}${H_STATUS}"
   [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && line="${line}${mid}${H_GREPTILE}"
   printf '%s%s%s%s\n' "$line" "$mid" "$H_UPDATED" "$right"
@@ -1260,7 +1260,7 @@ print_border() {
 
 print_border "┌" "┬" "┐"
 printf '│ %-*s ' "$TITLE_W" "Title"
-[ "$SHOW_STACKS" = true ] && printf '│ %-*s ' "$STACK_W" "Stack"
+[ "$STACK_MODE" = true ] && printf '│ %-*s ' "$STACK_W" "Stack"
 printf '│ %-*s │ %-*s │ %-*s ' "$AUTHOR_W" "Author" "$TYPE_W" "Type" "$STATUS_W" "Status"
 [ "$SHOW_GREPTILE_CONFIDENCE" = true ] && printf '│ %-*s ' "$GREPTILE_W" "Greptile"
 printf '│ %-*s │\n' "$UPDATED_W" "Updated"
@@ -1325,7 +1325,7 @@ if [ -n "$ROW_DATA" ]; then
     # Keep styling outside printf field widths so ANSI bytes never move a
     # separator. %s also avoids reinterpreting backslashes in PR titles.
     printf '│ %s%s%s ' "$text_prefix" "$title_cell" "$text_suffix"
-    [ "$SHOW_STACKS" = true ] && printf '│ %s%-*s%s ' "$text_prefix" "$STACK_W" "$stack_disp" "$text_suffix"
+    [ "$STACK_MODE" = true ] && printf '│ %s%-*s%s ' "$text_prefix" "$STACK_W" "$stack_disp" "$text_suffix"
     printf '│ %s%-*s%s │ %s%-*s%s │ %s%s%s ' \
       "$text_prefix" "$AUTHOR_W" "$author_disp" "$text_suffix" \
       "$text_prefix" "$TYPE_W" "$type_disp" "$text_suffix" \

@@ -52,13 +52,13 @@ chmod +x "$tmpdir/gh"
 run_prcheck() {
   PATH="$tmpdir:$PATH" PRCHECK_TTL=0 PRCHECK_AUTH_TTL=0 \
     "$repo_root/bin/prcheck" -r test/repo -u reviewer -L \
-    --include-all-base-branches --no-title-as-hyperlink "$@"
+    --no-title-as-hyperlink "$@"
 }
 
 plain=$(run_prcheck)
-stacks=$(run_prcheck --show-stacks)
-stacks_with_greptile=$(run_prcheck --show-stacks --greptile-confidence)
-json=$(run_prcheck --show-stacks --json)
+stacks=$(run_prcheck --stack-mode)
+stacks_with_greptile=$(run_prcheck --stack-mode --greptile-confidence)
+json=$(run_prcheck --stack-mode --json)
 
 [[ "$plain" != *"Stack"* ]]
 [[ "$stacks" == *"Stack"* ]]

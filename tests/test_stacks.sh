@@ -72,6 +72,8 @@ stacks=$(run_prcheck --stack-mode)
 stacks_with_greptile=$(run_prcheck --stack-mode --greptile-confidence)
 json=$(run_prcheck --stack-mode --json)
 retry=$(PRCHECK_FAIL_ONCE_FILE="$tmpdir/fail-once" run_prcheck --stack-mode 2>/dev/null)
+historical_root_line=$(printf '%s\n' "$stacks" | grep -F "├─ Historical root")
+historical_merged_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 1/2")
 historical_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 2/2")
 
 [[ "$plain" != *"Stack"* ]]
@@ -85,6 +87,9 @@ historical_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 2/2")
 [[ "$stacks" == *"Merged"* ]]
 [[ "$stacks" == *"└─ Linear 3"* ]]
 [[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
+[[ "$historical_root_line" == *"Historical root"*"0/2"* ]]
+[[ "$historical_merged_line" == *"Historical stack 1/2"*"1/2"* ]]
+[[ "$historical_line" == *"Historical stack 2/2"*"2/2"* ]]
 [[ "$historical_line" != *"fork"* ]]
 [[ "$stacks" == *"Solo"*"│ -"* ]]
 [[ "$stacks" != *"—"* ]]

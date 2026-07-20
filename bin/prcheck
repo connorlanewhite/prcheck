@@ -988,6 +988,7 @@ JQ_PROGRAM='
       | select($marker != null)
       | branch_lineage($branches; $pr.headRefName; []) as $lineage
       | {
+          prNumber: $pr.number,
           root: ($lineage[0] // $pr.headRefName),
           position: ($lineage | length),
           author: ($pr.author.login // "unknown"),
@@ -1019,10 +1020,11 @@ JQ_PROGRAM='
       | branch_lineage($branches; $pr.headRefName; []) as $stackLineage
       | ($stackLineage[0] // $pr.headRefName) as $stackRoot
       | ($stackLineage | length) as $stackPosition
-      | ([$anchors[]
+      | ([$anchors[] | select(.prNumber == $pr.number)] | .[0] // null) as $selfAnchor
+      | ($selfAnchor // ([$anchors[]
           | select(.root == $stackRoot)
           | . + {distance: ((.position - $stackPosition) | abs)}]
-        | sort_by(.distance, .position) | .[0] // null) as $stackAnchor
+        | sort_by(.distance, .number, .position) | .[0] // null)) as $stackAnchor
       | ([$explicitStacks[]
           | select(
               $stackAnchor != null
@@ -1031,6 +1033,10 @@ JQ_PROGRAM='
               and .total == $stackAnchor.total
             )]
         | .[0] // null) as $explicitStack
+      | (if $stackAnchor == null then null
+          elif $selfAnchor != null then $selfAnchor.number
+          else $stackAnchor.number + $stackPosition - $stackAnchor.position
+          end) as $anchoredNumber
       | ($pr | latest_review_by($ghUser)) as $myLastReview
       | (($pr.commits.nodes // []) | map(.commit.committedDate) | any(. > ($myLastReview.submittedAt // "1970-01-01T00:00:00Z"))) as $hasCommitsNewerThanReview
       | (($pr.files.nodes // []) | map(.viewerViewedState) | any(. != "VIEWED")) as $hasUnviewedInFirst100
@@ -1102,11 +1108,10 @@ JQ_PROGRAM='
           author: $author,
           _stack: {
             root: ($explicitStack.root // $stackRoot),
-            position: (if $explicitStack == null then $stackPosition else $stackAnchor.number end),
+            position: (if $explicitStack == null or $anchoredNumber == null then $stackPosition else $anchoredNumber end),
             childCount: ($branches[$pr.headRefName].childCount // 0),
             updatedAt: $pr.updatedAt,
-            anchoredNumber: (if $stackAnchor == null then null
-              else $stackAnchor.number + $stackPosition - $stackAnchor.position end),
+            anchoredNumber: $anchoredNumber,
             anchoredTotal: ($stackAnchor.total // null)
           },
           type: $prType,

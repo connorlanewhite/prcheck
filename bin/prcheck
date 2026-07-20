@@ -973,7 +973,11 @@ JQ_PROGRAM='
   | (reduce $candidates[] as $pr
       ({}; .[$pr.headRefName] = true)) as $heads
   | (reduce $candidates[] as $pr
-      ({}; .[$pr.baseRefName] = ((.[$pr.baseRefName] // 0) + 1))) as $childCounts
+      ({};
+        if ($pr.state // "OPEN") == "OPEN" then
+          .[$pr.baseRefName] = ((.[$pr.baseRefName] // 0) + 1)
+        else .
+        end)) as $childCounts
   | (reduce $candidates[] as $pr
       ({}; .[$pr.headRefName] = {
         parent: (if $heads[$pr.baseRefName] then $pr.baseRefName else null end),

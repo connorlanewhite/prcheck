@@ -36,6 +36,8 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
         pr(6; "Fork B";   "2026-01-09T00:00:00Z"; "fork-root"; "fork-b"),
         pr(10; "Solo";    "2026-01-08T00:00:00Z"; "main"; "solo"),
         pr(13; "Example stack 2/2: follow-up"; "2026-01-08T00:00:00Z"; "merged-base"; "open-child"),
+        pr(20; "Historical root"; "2026-01-06T00:00:00Z"; "main"; "historical-root"),
+        pr(22; "Historical stack 2/2"; "2026-01-05T00:00:00Z"; "historical-root"; "historical-open"),
         pr(2; "Linear 2"; "2026-01-02T00:00:00Z"; "linear-hidden"; "linear-2"),
         (pr(8; "Hidden (1/8)"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
           | .reviews.nodes = [{author: {login: "reviewer", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
@@ -46,7 +48,8 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
       ]},
       reviewRequested: {nodes: []}, reviewedBy: {nodes: []},
       stackMembers: {nodes: [
-        (pr(12; "Example stack 1/2: base"; "2026-01-07T00:00:00Z"; "main"; "merged-base") | .state = "MERGED")
+        (pr(12; "Example stack 1/2: base"; "2026-01-07T00:00:00Z"; "main"; "merged-base") | .state = "MERGED"),
+        (pr(21; "Historical stack 1/2"; "2026-01-04T00:00:00Z"; "historical-root"; "historical-merged") | .state = "MERGED")
       ]},
       greptilePrimary: {nodes: []}, greptileReviewRequested: {nodes: []},
       greptileReviewedBy: {nodes: []}
@@ -69,6 +72,7 @@ stacks=$(run_prcheck --stack-mode)
 stacks_with_greptile=$(run_prcheck --stack-mode --greptile-confidence)
 json=$(run_prcheck --stack-mode --json)
 retry=$(PRCHECK_FAIL_ONCE_FILE="$tmpdir/fail-once" run_prcheck --stack-mode 2>/dev/null)
+historical_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 2/2")
 
 [[ "$plain" != *"Stack"* ]]
 [[ "$plain" != *"Example stack 1/2"* ]]
@@ -78,9 +82,10 @@ retry=$(PRCHECK_FAIL_ONCE_FILE="$tmpdir/fail-once" run_prcheck --stack-mode 2>/d
 [[ "$stacks" == *"Linear 1"*"0/8"*"Linear 2"*"2/8"*"Linear 3"*"3/8"* ]]
 [[ "$stacks" == *$'\033[2m'"├─ Hidden (1/8)"* ]]
 [[ "$stacks" == *$'\033[2m'"├─ Example stack 1/2: base"*"Example stack 2/2: follow-up"*"2/2"* ]]
-[[ "$stacks" == *"│ Merged"* ]]
+[[ "$stacks" == *"Merged"* ]]
 [[ "$stacks" == *"└─ Linear 3"* ]]
 [[ "$stacks" == *"Fork root"*"fork"*"Fork A"*"fork"*"Fork B"*"fork"* ]]
+[[ "$historical_line" != *"fork"* ]]
 [[ "$stacks" == *"Solo"*"│ -"* ]]
 [[ "$stacks" != *"—"* ]]
 [[ "$stacks_with_greptile" == *"Stack"*"Greptile"* ]]

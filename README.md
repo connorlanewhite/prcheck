@@ -16,7 +16,7 @@ This script fixes that by showing only the PRs that genuinely need your review:
 
 Queries GitHub's API to find open PRs and intelligently filters them based on your interaction history. For each PR, it checks whether you've reviewed it, whether new commits have landed since your last review, and whether you've viewed all the files. Only PRs that need your attention make it to the output table.
 
-By default, only PRs with passing CI, no merge conflicts, and a target matching the repository's default branch (e.g., `main` or `master`) are shown. Use `--include-unready` to include PRs with failing, pending, or missing CI or merge conflicts. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
+By default, only PRs with passing CI, no merge conflicts, all bot-started review threads resolved, and a target matching the repository's default branch (e.g., `main` or `master`) are shown. Use `--include-unready` to include PRs with failing, pending, or missing CI or merge conflicts, and `--include-bot-unresolved` to include PRs with unresolved bot-started threads. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
 
 Use `--stack-mode` to include non-default base branches, group stacked PRs in base-to-tip order, and add a `Stack` column such as `1/8`. A trailing marker such as `(2/8)` in a PR title anchors the sequence for surrounding PRs; the nearest marker wins if authors use conflicting sequences. Forked stacks are grouped and marked `fork` instead of being given a misleading linear sequence.
 
@@ -59,6 +59,7 @@ Due to GitHub API pagination constraints, this tool has the following limitation
 
 - **File checking**: Only the first 100 files per PR are fetched. If a PR has more than 100 files, the "Unviewed Files" indicator may not be accurate.
 - **Review history**: Only the latest 50 reviews per PR are checked. If a PR has more than 50 reviews and your review was earlier, it may be incorrectly flagged as "Never Reviewed".
+- **Bot review threads**: The first 100 threads per PR are checked. PRs with more than 100 threads are excluded by default because the remaining threads cannot be verified; use `--include-bot-unresolved` to bypass this filter.
 - **Greptile confidence**: Only the latest 20 timeline comments and latest 50 reviews are checked for a score. An older Greptile summary may display `—`.
 
 For most PRs, these limits are sufficient. However, be aware of potential false positives on exceptionally large or heavily-reviewed PRs.
@@ -125,6 +126,7 @@ Common flags:
 - `-n NUMBER` — max PRs to fetch (default: 50)
 - `--no-approvals` — only show PRs without any approvals
 - `--ready-only` / `--include-unready` — require passing CI and no merge conflicts, or disable that filter (default: `--ready-only`)
+- `--all-bot-threads-resolved` / `--include-bot-unresolved` — require all bot-started review threads to be resolved, or disable that filter (default: `--all-bot-threads-resolved`)
 - `--created-within DAYS` — only show PRs opened within the last number of days
 - `--request-review` — request your review on each listed PR where it is not already requested
 - `--include-team-review-requests` — include team-based review requests in addition to direct requests

@@ -20,6 +20,8 @@ STACK_MODE=false
 NO_APPROVALS=false
 # Only show PRs whose latest commit has passing CI and no merge conflicts.
 READY_ONLY=true
+# Only show PRs whose bot-started review threads are all resolved.
+ALL_BOT_THREADS_RESOLVED=true
 # Default: exclude PRs where base branch is not the repo's default branch
 EXCLUDE_NON_DEFAULT_BASE=true
 # Default: only union in PRs that directly request the user as a reviewer.
@@ -53,6 +55,9 @@ Options:
       --ready-only / --include-unready
                                   Require passing CI and no merge conflicts, or disable
                                   that filter (default: --ready-only)
+      --all-bot-threads-resolved / --include-bot-unresolved
+                                  Require all bot-started review threads to be resolved,
+                                  or disable that filter (default: --all-bot-threads-resolved)
   -u, --user USERNAME             Your GitHub username (default: ${GH_USER:-auto})
   -n, --limit N                   Max PRs to fetch (default: ${LIMIT})
       --created-within DAYS       Only PRs opened within the last DAYS days (e.g. 14 for two weeks)
@@ -81,6 +86,7 @@ Examples:
   $0 -a user1,user2
   $0 --no-approvals
   $0 --include-unready
+  $0 --include-bot-unresolved
   $0 --greptile-confidence
   $0 --created-within 14
   $0 --created-within 14 --request-review
@@ -162,6 +168,7 @@ _prcheck() {
     '(-a --authors)'{-a,--authors}'[Comma-separated authors to include]:authors:' \
     '--no-approvals[Only show PRs without any approvals]' \
     '(--ready-only --include-unready)'{--ready-only,--include-unready}'[Filter by readiness (default: --ready-only)]' \
+    '(--all-bot-threads-resolved --include-bot-unresolved)'{--all-bot-threads-resolved,--include-bot-unresolved}'[Filter unresolved bot-started threads (default: --all-bot-threads-resolved)]' \
     '(-u --user)'{-u,--user}'[GitHub username]:username:' \
     '(-n --limit)'{-n,--limit}'[Max PRs to fetch]:limit:' \
     '--created-within[Only PRs opened within the last N days]:days:' \
@@ -419,6 +426,8 @@ while [[ $# -gt 0 ]]; do
     --no-approvals) NO_APPROVALS=true; shift;;
     --ready-only) READY_ONLY=true; shift;;
     --include-unready) READY_ONLY=false; shift;;
+    --all-bot-threads-resolved) ALL_BOT_THREADS_RESOLVED=true; shift;;
+    --include-bot-unresolved) ALL_BOT_THREADS_RESOLVED=false; shift;;
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
     --created-within) CREATED_WITHIN_DAYS="$2"; shift 2;;
@@ -717,6 +726,7 @@ query(
 }
 
 fragment prFields on PullRequest {
+  id
   number
   state
   mergeable
@@ -839,28 +849,27 @@ CACHE_TTL="${PRCHECK_TTL:-8}"
 mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
-# shape changes so stale caches are not reused.
-CACHE_VERSION=v20
-CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}|${STACK_MODE}"
+# shape changes so stale caches are not reused. READY_ONLY affects the set of
+# PR IDs used by the companion bot-thread query.
+CACHE_VERSION=v21
+CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${READY_ONLY}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}|${STACK_MODE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
+BOT_THREADS_CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}_bot_threads.json"
 
-# Check if cache exists and is fresh (< $CACHE_TTL seconds old)
-USE_CACHE=false
-if [ -f "$CACHE_FILE" ]; then
-  # Get file modification time (macOS uses -f %m, Linux uses -c %Y)
-  if stat -f %m "$CACHE_FILE" >/dev/null 2>&1; then
-    # macOS
-    CACHE_MTIME=$(stat -f %m "$CACHE_FILE")
+cache_is_fresh() {
+  local file=$1 ttl=$2 mtime
+  [ -f "$file" ] || return 1
+  if stat -f %m "$file" >/dev/null 2>&1; then
+    mtime=$(stat -f %m "$file")
   else
-    # Linux
-    CACHE_MTIME=$(stat -c %Y "$CACHE_FILE")
+    mtime=$(stat -c %Y "$file")
   fi
-  CACHE_AGE=$(($(date +%s) - CACHE_MTIME))
-  if [ "$CACHE_AGE" -lt "$CACHE_TTL" ]; then
-    USE_CACHE=true
-  fi
-fi
+  [ "$(($(date +%s) - mtime))" -lt "$ttl" ]
+}
+
+USE_CACHE=false
+cache_is_fresh "$CACHE_FILE" "$CACHE_TTL" && USE_CACHE=true
 
 # Fetch data (from cache or API)
 if [ "$USE_CACHE" = true ]; then
@@ -1118,10 +1127,12 @@ JQ_PROGRAM='
       | ((($pr.author.login // "unknown") != $ghUser)) as $passesSelfAuthor
       | ((($authors | length) == 0) or (($authors | index(($pr.author.login // ""))) != null)) as $passesAuthors
       | (($excludeNonDefaultBase == "false") or ($pr.baseRefName == $pr.repository.defaultBranchRef.name)) as $passesBase
+      | (($blockedBotThreadIds | index($pr.id)) == null) as $passesBotThreads
       | (($pr.reviewRequests.nodes // []) | any(.requestedReviewer.login == $ghUser)) as $selfRequested
       | (.title | gsub("[\\n\\r\\t]"; " ") | gsub(" +"; " ")) as $clean_title
       | {
           number: $pr.number,
+          _id: $pr.id,
           title: $clean_title,
           url: .url,
           author: $author,
@@ -1140,14 +1151,116 @@ JQ_PROGRAM='
           greptileConfidence: $greptileConfidence,
           selfRequested: $selfRequested,
           _approvedByYou: $approvedByYou,
-          _visible: (($pr.state // "OPEN") == "OPEN" and $needsAttention and $passesApprovals and $passesReady and $passesSelfAuthor and $passesAuthors and $passesBase)
+          _visible: (($pr.state // "OPEN") == "OPEN" and $needsAttention and $passesApprovals and $passesReady and $passesSelfAuthor and $passesAuthors and $passesBase and $passesBotThreads)
         }
     )
 '
 
+filter_prs() {
+  local blocked_bot_thread_ids=$1
+  jq \
+    --arg ghUser "$GH_USER" \
+    --arg authorsCsv "$AUTHORS" \
+    --arg noApprovals "$NO_APPROVALS" \
+    --arg readyOnly "$READY_ONLY" \
+    --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
+    --argjson blockedBotThreadIds "$blocked_bot_thread_ids" \
+    "$JQ_PROGRAM"
+}
+
+fetch_bot_threads() {
+  local pr_ids=$1 response query attempt
+  local id_args=()
+  local fetched=false
+
+  if cache_is_fresh "$BOT_THREADS_CACHE_FILE" "$CACHE_TTL"; then
+    response=$(cat "$BOT_THREADS_CACHE_FILE")
+  else
+    query=$(cat <<'GRAPHQL'
+query BotThreads($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on PullRequest {
+      id
+      reviewThreads(first: 100) {
+        pageInfo { hasNextPage }
+        nodes {
+          isResolved
+          comments(first: 1) {
+            nodes { author { __typename } }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+    while IFS= read -r id; do
+      id_args+=( -F "ids[]=$id" )
+    done < <(echo "$pr_ids" | jq -r '.[]')
+
+    for attempt in 1 2; do
+      if response=$(gh api graphql -f query="$query" "${id_args[@]}"); then
+        fetched=true
+        break
+      fi
+      if [ "$attempt" -eq 2 ]; then
+        response=""
+        break
+      fi
+      echo "[prcheck] GitHub bot-thread request failed; retrying..." >&2
+      sleep 1
+    done
+  fi
+
+  if [ -z "${response:-}" ] || ! echo "$response" | jq -e \
+    '((.errors // []) | length == 0) and ((.data.nodes // null) | type == "array")' >/dev/null; then
+    echo "[prcheck] Error: could not inspect bot review threads. Retry or use --include-bot-unresolved." >&2
+    return 1
+  fi
+
+  [ "$fetched" = true ] && echo "$response" > "$BOT_THREADS_CACHE_FILE"
+  echo "$response"
+}
+
+blocked_bot_thread_ids() {
+  local requested=$1
+  jq -c --argjson requested "$requested" '
+    def unresolved_bot_thread:
+      .isResolved == false
+      and ((.comments.nodes[0].author.__typename // "") == "Bot");
+
+    (.data.nodes // []) as $nodes
+    | ($nodes | map(select(.id != null) | .id)) as $returned
+    | ([
+        $nodes[]
+        | select(.id != null and (
+            .reviewThreads == null
+            or (.reviewThreads.pageInfo.hasNextPage // false)
+            or any(.reviewThreads.nodes[]?; unresolved_bot_thread)
+          ))
+        | .id
+      ] + ($requested - $returned) | unique)'
+}
+
+# Thread state is unavailable in search qualifiers. Reduce the three searches
+# first, then inspect each otherwise-visible PR once by its deduplicated ID.
+BLOCKED_BOT_THREAD_IDS='[]'
+if [ "$ALL_BOT_THREADS_RESOLVED" = true ]; then
+  BOT_THREAD_PR_IDS=$(filter_prs '[]' <<< "$GRAPHQL_RESPONSE" \
+    | jq -c 'map(select(._visible) | ._id)')
+  if [ "$(echo "$BOT_THREAD_PR_IDS" | jq 'length')" -gt 0 ]; then
+    BOT_THREADS_RESPONSE=$(fetch_bot_threads "$BOT_THREAD_PR_IDS")
+    BLOCKED_BOT_THREAD_IDS=$(blocked_bot_thread_ids "$BOT_THREAD_PR_IDS" \
+      <<< "$BOT_THREADS_RESPONSE")
+  fi
+fi
+
+FILTERED_PRS=$(filter_prs "$BLOCKED_BOT_THREAD_IDS" <<< "$GRAPHQL_RESPONSE")
+
 # Expand a stack when any member needs attention. Filtered members remain in
 # the tree as dimmed children; unrelated stacks stay hidden.
-JQ_STACK_PROGRAM=' | (
+JQ_STACK_PROGRAM='(
   def stack_layout:
     group_by(._stack.root) | map(
       . as $group
@@ -1208,13 +1321,8 @@ JQ_STACK_PROGRAM=' | (
 if [ "$REQUEST_REVIEW" = true ]; then
   # Request a review from GH_USER on each listed PR, skipping any where they're
   # already a requested reviewer. Reuses the same filtered set the table shows.
-  REQUEST_TARGETS=$(echo "$GRAPHQL_RESPONSE" | jq -r \
-    --arg ghUser "$GH_USER" \
-    --arg authorsCsv "$AUTHORS" \
-    --arg noApprovals "$NO_APPROVALS" \
-    --arg readyOnly "$READY_ONLY" \
-    --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-    "$JQ_PROGRAM"' | .[] | select(._visible and (.selfRequested | not)) | "\(.number)\t\(.url)"')
+  REQUEST_TARGETS=$(echo "$FILTERED_PRS" | jq -r \
+    '.[] | select(._visible and (.selfRequested | not)) | "\(.number)\t\(.url)"')
 
   if [ -z "$REQUEST_TARGETS" ]; then
     echo "[prcheck] Nothing to do: you're already a requested reviewer on every listed PR (or none matched)."
@@ -1234,31 +1342,21 @@ if [ "$REQUEST_REVIEW" = true ]; then
 fi
 
 if [ "$JSON_OUTPUT" = true ]; then
-  echo "$GRAPHQL_RESPONSE" | jq \
-    --arg ghUser "$GH_USER" \
-    --arg authorsCsv "$AUTHORS" \
-    --arg noApprovals "$NO_APPROVALS" \
-    --arg readyOnly "$READY_ONLY" \
-    --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
-    "$JQ_PROGRAM"' | map(select(._visible) | del(._stack, ._approvedByYou, ._visible))'
+  echo "$FILTERED_PRS" | jq \
+    'map(select(._visible) | del(._id, ._stack, ._approvedByYou, ._visible))'
   exit 0
 fi
 
 # Table output: emit normalized TSV rows, then render fixed-width cells in Bash
 # so ANSI hyperlink and color escape bytes do not distort column widths.
-TABLE_JQ_PROGRAM="$JQ_PROGRAM"' | .[] | select(._visible)'
+TABLE_JQ_PROGRAM='.[] | select(._visible)'
 if [ "$STACK_MODE" = true ]; then
-  TABLE_JQ_PROGRAM="$JQ_PROGRAM$JQ_STACK_PROGRAM"
+  TABLE_JQ_PROGRAM="$JQ_STACK_PROGRAM"
 else
   TABLE_JQ_PROGRAM="$TABLE_JQ_PROGRAM | . + {stack: \"-\", tree: \"\", _dimmed: false, _parent: false}"
 fi
 
-ROW_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
-  --arg ghUser "$GH_USER" \
-  --arg authorsCsv "$AUTHORS" \
-  --arg noApprovals "$NO_APPROVALS" \
-  --arg readyOnly "$READY_ONLY" \
-  --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
+ROW_DATA=$(echo "$FILTERED_PRS" | jq -r \
   "$TABLE_JQ_PROGRAM"' | [.title, .url, .tree, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "-" else "\(.greptileConfidence)/5" end), ._dimmed, ._parent] | join("\u001f")')
 
 # Truncate a string to a visible width, appending "..." if cut. Writes the

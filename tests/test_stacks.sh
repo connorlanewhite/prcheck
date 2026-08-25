@@ -23,9 +23,13 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
       updatedAt: $updated,
       baseRefName: $base,
       headRefName: $head,
+      mergeable: "MERGEABLE",
       repository: {defaultBranchRef: {name: "main"}},
       author: {login: "writer", name: "Writer"},
-      commits: {nodes: []},
+      commits: {nodes: [{commit: {
+        committedDate: "2025-01-01T00:00:00Z",
+        statusCheckRollup: {state: "SUCCESS"}
+      }}]},
       reviews: {nodes: []},
       reviewRequests: {nodes: []},
       files: {nodes: [], pageInfo: {hasNextPage: false}}
@@ -38,6 +42,10 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
         pr(13; "Example stack 2/2: follow-up"; "2026-01-08T00:00:00Z"; "merged-base"; "open-child"),
         pr(20; "Historical root"; "2026-01-06T00:00:00Z"; "main"; "historical-root"),
         pr(22; "Historical stack 2/2"; "2026-01-05T00:00:00Z"; "historical-root"; "historical-open"),
+        (pr(30; "Failing CI"; "2026-01-05T00:00:00Z"; "main"; "failing-ci")
+          | .commits.nodes[-1].commit.statusCheckRollup.state = "FAILURE"),
+        (pr(31; "Merge conflict"; "2026-01-05T00:00:00Z"; "main"; "merge-conflict")
+          | .mergeable = "CONFLICTING"),
         pr(2; "Linear 2"; "2026-01-02T00:00:00Z"; "linear-hidden"; "linear-2"),
         (pr(8; "Hidden (1/8)"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
           | .reviews.nodes = [{author: {login: "reviewer", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
@@ -72,6 +80,8 @@ stacks=$(run_prcheck --stack-mode)
 stacks_with_greptile=$(run_prcheck --stack-mode --greptile-confidence)
 json=$(run_prcheck --stack-mode --json)
 retry=$(PRCHECK_FAIL_ONCE_FILE="$tmpdir/fail-once" run_prcheck --stack-mode 2>/dev/null)
+ready=$(run_prcheck --ready-only)
+unready=$(run_prcheck --include-unready)
 historical_root_line=$(printf '%s\n' "$stacks" | grep -F "├─ Historical root")
 historical_merged_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 1/2")
 historical_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 2/2")
@@ -98,5 +108,12 @@ historical_line=$(printf '%s\n' "$stacks" | grep -F "Historical stack 2/2")
 [[ "$json" != *"Hidden"* ]]
 [[ "$json" != *"Example stack 1/2"* ]]
 [[ "$retry" == *"Example stack 2/2: follow-up"* ]]
+[[ "$plain" != *"Failing CI"* ]]
+[[ "$plain" != *"Merge conflict"* ]]
+[[ "$ready" != *"Failing CI"* ]]
+[[ "$ready" != *"Merge conflict"* ]]
+[[ "$ready" == *"Solo"* ]]
+[[ "$unready" == *"Failing CI"* ]]
+[[ "$unready" == *"Merge conflict"* ]]
 
 echo "stack tests passed"

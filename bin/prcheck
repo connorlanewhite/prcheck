@@ -18,6 +18,8 @@ STACK_MODE=false
 # Only show PRs with no meaningful approvals (bots/apps and PR-author reviews
 # are ignored the same way the Status column ignores them).
 NO_APPROVALS=false
+# Only show PRs whose latest commit has passing CI and no merge conflicts.
+READY_ONLY=true
 # Default: exclude PRs where base branch is not the repo's default branch
 EXCLUDE_NON_DEFAULT_BASE=true
 # Default: only union in PRs that directly request the user as a reviewer.
@@ -48,6 +50,9 @@ Options:
   -L, --no-label                  Do not filter by label
   -a, --authors USER1,USER2       Comma-separated authors (GitHub logins) to include
       --no-approvals              Only show PRs without any approvals
+      --ready-only / --include-unready
+                                  Require passing CI and no merge conflicts, or disable
+                                  that filter (default: --ready-only)
   -u, --user USERNAME             Your GitHub username (default: ${GH_USER:-auto})
   -n, --limit N                   Max PRs to fetch (default: ${LIMIT})
       --created-within DAYS       Only PRs opened within the last DAYS days (e.g. 14 for two weeks)
@@ -75,6 +80,7 @@ Examples:
   $0 --no-title-as-hyperlink
   $0 -a user1,user2
   $0 --no-approvals
+  $0 --include-unready
   $0 --greptile-confidence
   $0 --created-within 14
   $0 --created-within 14 --request-review
@@ -155,6 +161,7 @@ _prcheck() {
     '(-L --no-label)'{-L,--no-label}'[Do not filter by label]' \
     '(-a --authors)'{-a,--authors}'[Comma-separated authors to include]:authors:' \
     '--no-approvals[Only show PRs without any approvals]' \
+    '(--ready-only --include-unready)'{--ready-only,--include-unready}'[Filter by readiness (default: --ready-only)]' \
     '(-u --user)'{-u,--user}'[GitHub username]:username:' \
     '(-n --limit)'{-n,--limit}'[Max PRs to fetch]:limit:' \
     '--created-within[Only PRs opened within the last N days]:days:' \
@@ -410,6 +417,8 @@ while [[ $# -gt 0 ]]; do
     -L|--no-label) NO_LABEL=true; shift;;
     -a|--authors) AUTHORS="$2"; shift 2;;
     --no-approvals) NO_APPROVALS=true; shift;;
+    --ready-only) READY_ONLY=true; shift;;
+    --include-unready) READY_ONLY=false; shift;;
     -u|--user) GH_USER="$2"; USER_SET=true; shift 2;;
     -n|--limit) LIMIT="$2"; shift 2;;
     --created-within) CREATED_WITHIN_DAYS="$2"; shift 2;;
@@ -710,6 +719,7 @@ query(
 fragment prFields on PullRequest {
   number
   state
+  mergeable
   title
   url
   updatedAt
@@ -720,7 +730,12 @@ fragment prFields on PullRequest {
   }
   author { login ... on User { name } }
   commits(last: 10) {
-    nodes { commit { committedDate } }
+    nodes {
+      commit {
+        committedDate
+        statusCheckRollup { state }
+      }
+    }
   }
   reviews(last: 50) {
     nodes {
@@ -825,7 +840,7 @@ mkdir -p "$CACHE_DIR"
 
 # Cache key from query parameters. Bump CACHE_VERSION when the GraphQL query
 # shape changes so stale caches are not reused.
-CACHE_VERSION=v19
+CACHE_VERSION=v20
 CACHE_KEY="${CACHE_VERSION}|${REPO}|${LABEL}|${LIMIT}|${AUTHORS}|${GH_USER}|${NO_APPROVALS}|${EXCLUDE_NON_DEFAULT_BASE}|${INCLUDE_TEAM_REVIEW_REQUESTS}|${CREATED_WITHIN_DAYS}|${SHOW_GREPTILE_CONFIDENCE}|${STACK_MODE}"
 CACHE_KEY="${CACHE_KEY//[!a-zA-Z0-9]/_}"
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
@@ -1063,6 +1078,10 @@ JQ_PROGRAM='
       | ($pr | latest_greptile_confidence) as $greptileConfidence
       | ($latestPerReviewer | map(select(.state == "APPROVED"))) as $approvers
       | (($noApprovals == "false") or (($approvers | length) == 0)) as $passesApprovals
+      | (($readyOnly == "false") or (
+          $pr.mergeable != "CONFLICTING"
+          and $pr.commits.nodes[-1].commit.statusCheckRollup.state == "SUCCESS"
+        )) as $passesReady
       | ($latestPerReviewer | map(select(.state == "CHANGES_REQUESTED"))) as $changeRequesters
       | ($latestPerReviewer | map(select(.state == "COMMENTED" or .state == "DISMISSED"))) as $commenters
       | ($approvers        | map(select(.author.login != $ghUser)) | length) as $approversOthers
@@ -1121,7 +1140,7 @@ JQ_PROGRAM='
           greptileConfidence: $greptileConfidence,
           selfRequested: $selfRequested,
           _approvedByYou: $approvedByYou,
-          _visible: (($pr.state // "OPEN") == "OPEN" and $needsAttention and $passesApprovals and $passesSelfAuthor and $passesAuthors and $passesBase)
+          _visible: (($pr.state // "OPEN") == "OPEN" and $needsAttention and $passesApprovals and $passesReady and $passesSelfAuthor and $passesAuthors and $passesBase)
         }
     )
 '
@@ -1193,6 +1212,7 @@ if [ "$REQUEST_REVIEW" = true ]; then
     --arg ghUser "$GH_USER" \
     --arg authorsCsv "$AUTHORS" \
     --arg noApprovals "$NO_APPROVALS" \
+    --arg readyOnly "$READY_ONLY" \
     --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
     "$JQ_PROGRAM"' | .[] | select(._visible and (.selfRequested | not)) | "\(.number)\t\(.url)"')
 
@@ -1218,6 +1238,7 @@ if [ "$JSON_OUTPUT" = true ]; then
     --arg ghUser "$GH_USER" \
     --arg authorsCsv "$AUTHORS" \
     --arg noApprovals "$NO_APPROVALS" \
+    --arg readyOnly "$READY_ONLY" \
     --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
     "$JQ_PROGRAM"' | map(select(._visible) | del(._stack, ._approvedByYou, ._visible))'
   exit 0
@@ -1236,6 +1257,7 @@ ROW_DATA=$(echo "$GRAPHQL_RESPONSE" | jq -r \
   --arg ghUser "$GH_USER" \
   --arg authorsCsv "$AUTHORS" \
   --arg noApprovals "$NO_APPROVALS" \
+  --arg readyOnly "$READY_ONLY" \
   --arg excludeNonDefaultBase "$JQ_EXCLUDE_NON_DEFAULT_BASE" \
   "$TABLE_JQ_PROGRAM"' | [.title, .url, .tree, .stack, .author, .type, .status, .updated, .tone, (if .greptileConfidence == null then "-" else "\(.greptileConfidence)/5" end), ._dimmed, ._parent] | join("\u001f")')
 

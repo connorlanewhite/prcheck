@@ -16,7 +16,7 @@ This script fixes that by showing only the PRs that genuinely need your review:
 
 Queries GitHub's API to find open PRs and intelligently filters them based on your interaction history. For each PR, it checks whether you've reviewed it, whether new commits have landed since your last review, and whether you've viewed all the files. Only PRs that need your attention make it to the output table.
 
-By default, only PRs targeting the repository's default branch (e.g., `main` or `master`) are shown. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
+By default, only PRs with passing CI, no merge conflicts, and a target matching the repository's default branch (e.g., `main` or `master`) are shown. Use `--include-unready` to include PRs with failing, pending, or missing CI or merge conflicts. PRs targeting other branches (like feature branches or release branches) are excluded unless you use the `--include-all-base-branches` flag.
 
 Use `--stack-mode` to include non-default base branches, group stacked PRs in base-to-tip order, and add a `Stack` column such as `1/8`. A trailing marker such as `(2/8)` in a PR title anchors the sequence for surrounding PRs; the nearest marker wins if authors use conflicting sequences. Forked stacks are grouped and marked `fork` instead of being given a misleading linear sequence.
 
@@ -124,6 +124,7 @@ Common flags:
 - `-u USERNAME` — set your GitHub username explicitly
 - `-n NUMBER` — max PRs to fetch (default: 50)
 - `--no-approvals` — only show PRs without any approvals
+- `--ready-only` / `--include-unready` — require passing CI and no merge conflicts, or disable that filter (default: `--ready-only`)
 - `--created-within DAYS` — only show PRs opened within the last number of days
 - `--request-review` — request your review on each listed PR where it is not already requested
 - `--include-team-review-requests` — include team-based review requests in addition to direct requests

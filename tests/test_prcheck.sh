@@ -110,6 +110,11 @@ elif [ "$1" = api ] && [ "$2" = graphql ]; then
         pr(34; "Unresolved human thread"; "2026-01-05T00:00:00Z"; "main"; "unresolved-human"),
         pr(35; "Outdated unresolved bot thread"; "2026-01-05T00:00:00Z"; "main"; "outdated-bot"),
         pr(36; "More than 100 threads"; "2026-01-05T00:00:00Z"; "main"; "too-many-threads"),
+        (pr(37; "Approved"; "2026-01-05T00:00:00Z"; "main"; "approved")
+          | .reviews.nodes = [{author: {login: "approver", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]),
+        (pr(38; "Approval re-requested"; "2026-01-05T00:00:00Z"; "main"; "approval-re-requested")
+          | .reviews.nodes = [{author: {login: "approver", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
+          | .reviewRequests.nodes = [{requestedReviewer: {login: "approver"}}]),
         pr(2; "Linear 2"; "2026-01-02T00:00:00Z"; "linear-hidden"; "linear-2"),
         (pr(8; "Hidden (1/8)"; "2026-01-02T00:00:00Z"; "linear-1"; "linear-hidden")
           | .reviews.nodes = [{author: {login: "reviewer", __typename: "User"}, state: "APPROVED", submittedAt: "2026-01-03T00:00:00Z"}]
@@ -193,6 +198,14 @@ test_readiness_filter() {
   assert_contains "$include_unready" "Merge conflict"
 }
 
+test_approval_filter() {
+  local output
+  output=$(run_prcheck --no-approvals)
+
+  assert_not_contains "$output" "│ Approved "
+  assert_contains "$output" "Approval re-requested"
+}
+
 test_bot_thread_filter() {
   local default_output explicit_filter opt_out json request_log
   default_output=$(run_prcheck)
@@ -224,5 +237,6 @@ test_bot_thread_filter() {
 
 test_stack_rendering
 test_readiness_filter
+test_approval_filter
 test_bot_thread_filter
 echo "prcheck tests passed"

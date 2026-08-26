@@ -928,16 +928,18 @@ JQ_PROGRAM='
       else max_by(.submittedAt // "1970-01-01T00:00:00Z")
       end;
 
-  # Keep one current review state per independent human reviewer. Bot/App
-  # activity and replies from the PR author are not independent vetting.
+  # Keep one current review state per independent human reviewer. A pending
+  # re-review request supersedes the earlier state from that reviewer.
   def latest_independent_reviews:
     . as $pr
+    | [($pr.reviewRequests.nodes[]?.requestedReviewer.login // empty)] as $requestedReviewers
     | $pr.reviews.nodes
-    | map(select(
-        .author != null
-        and ((.author.__typename // "") != "Bot")
-        and ((.author.login // "") | endswith("[bot]") | not)
-        and ((.author.login // "") != ($pr.author.login // ""))
+    | map(. as $review | select(
+        $review.author != null
+        and (($review.author.__typename // "") != "Bot")
+        and (($review.author.login // "") | endswith("[bot]") | not)
+        and (($review.author.login // "") != ($pr.author.login // ""))
+        and (($requestedReviewers | index($review.author.login)) == null)
       ))
     | group_by(.author.login)
     | map(max_by(.submittedAt // "1970-01-01T00:00:00Z"));
